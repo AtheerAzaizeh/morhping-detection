@@ -1,0 +1,12 @@
+numpy
+opencv-python-headless
+matplotlib
+scipy
+scikit-learn
+scikit-image
+mediapipe>=0.10.30
+tensorflow-cpu>=2.16
+jupyter
+nbformat
+nbconvert
+ipykernel

@@ -68,7 +68,7 @@ for i in range(0, len(X), batch):
     out.append(model.predict(X[i:i+batch].astype(np.float32), verbose=0))
 ```
 
-The notebook also *opens the network up* (Section 5): parameters per stage, learned stem filters, activation maps from shallow to deep layers for a real vs a morphed face, the raw 2304-d feature vectors, and PCA/t-SNE projections of the feature space — real and morph form visibly separable clusters before any classifier is trained.
+The notebook also *opens the network up* (Section 5): parameters per stage, learned stem filters, activation maps from shallow to deep layers for a real vs a morphed face, the raw 2304-d feature vectors, and PCA/t-SNE projections of the feature space — real and morph separate partially (many small per-base-image clusters) before any classifier is trained, consistent with the ~0.93 test AUC.
 
 ## Phase 5 — Model training
 
@@ -93,25 +93,31 @@ grid = GridSearchCV(SVC(kernel='rbf', probability=True, random_state=SEED),
 grid.fit(Ztr, ytr)
 ```
 
-Selected hyper-parameters: **__SVM_PARAMS__** (CV accuracy __CV_ACC__).
+Selected hyper-parameters: **{'C': 10, 'gamma': 0.0001}** (CV accuracy 0.981 — optimistic, because augmented copies of one base image can land in different CV folds; the honest number is the identity-disjoint test score below).
 
 ## Phase 6 — Evaluation (identity-disjoint test set)
 
 | Metric | Value |
 |---|---|
-| Accuracy | **__ACC__** |
-| Precision (morph) | __PREC__ |
-| Recall (morph) | __REC__ |
-| F1 (morph) | __F1__ |
-| ROC-AUC | **__AUC__** |
-| Confusion matrix | TN=__TN__ FP=__FP__ FN=__FN__ TP=__TP__ |
-| Neural head (test acc.) | __NN_ACC__ |
+| Accuracy | **0.852** |
+| Precision (morph) | 0.897 |
+| Recall (morph) | 0.795 |
+| F1 (morph) | 0.843 |
+| ROC-AUC | **0.935** |
+| Confusion matrix | TN=40 FP=4 FN=9 TP=35 |
+| Neural head (test acc.) | 0.875 |
 
-**Threshold optimization (paper §4.4).** The decision threshold on P(morph) is swept on the *validation* set; the F1-optimal value __THR__ applied to the test set gives accuracy __ACC_THR__. In deployment the threshold would instead cap the false-negative (missed-morph) rate, since undetected morphs are the costly error in border control.
+**Threshold optimization (paper §4.4).** The decision threshold on P(morph) is swept on the *validation* set; the F1-optimal value 0.95 applied to the test set gives accuracy 0.773 — *worse* than the default 0.5 (0.852). With only 80 validation images the tuned threshold overfits, so the default operating point is kept; this is a useful negative result showing threshold calibration needs a large calibration set. In deployment the threshold would instead cap the false-negative (missed-morph) rate, since undetected morphs are the costly error in border control.
 
 **Comparative analysis (paper §4.2).** The pipeline was repeated with EfficientNet-B0 (1280-d, softmax baseline) and B5 (2048-d, linear SVM):
 
-__COMPARE_TABLE__
+| Model | Feature dim | Accuracy | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| EfficientNet-B0 (softmax) | 1280 | 0.920 | 0.97 | 0.86 | 0.92 |
+| EfficientNet-B5 (SVM linear) | 2048 | 0.909 | 0.93 | 0.89 | 0.91 |
+| EfficientNet-B6 (SVM RBF) — proposed | 2304 | 0.852 | 0.90 | 0.80 | 0.84 |
+
+Honest reading: on this small test set (44+44 images) the smaller backbones matched or beat B6+RBF — a few images swing accuracy by several points, and our landmark-based morphs carry strong low-level artifacts that shallow features already catch. The paper's ordering (B0 < B5 < B6) was obtained on a much larger GAN-morph dataset where subtler artifacts dominate; reproducing it would require that scale and type of data.
 
 ## Phase 7 — Deployment: real-time prediction
 

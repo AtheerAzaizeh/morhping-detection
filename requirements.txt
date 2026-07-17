@@ -10,3 +10,5 @@ jupyter
 nbformat
 nbconvert
 ipykernel
+flask
+joblib

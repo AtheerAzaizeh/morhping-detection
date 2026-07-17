@@ -17,6 +17,20 @@ Two-part course project:
    ROC-AUC, threshold optimization, EfficientNet B0/B5/B6 comparison, network-internals
    visualizations (filters, activation maps, PCA/t-SNE) and a real-time prediction demo.
 
+## Try the model — web demo
+
+A small Flask app lets you upload any photo and get a live **real / morph** verdict
+(face detection → 512² crop → CLAHE → EfficientNet-B6 features → SVM):
+
+```bash
+pip install -r requirements.txt
+python app/export_model.py     # one-time: builds app/model/ from the cached B6 features
+python app/server.py           # open http://localhost:7860
+```
+
+The page shows the detected face crop, the verdict, P(morph) as a meter, and the CPU
+latency (~0.5–2 s per image after warm-up).
+
 ## Reports
 
 - `reports/Part1_Morphing_Report.md` — method, landmark alignment, interpolation, observations & limitations.

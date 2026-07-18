@@ -418,7 +418,17 @@ def log(name, m):
         p, c = df.iloc[-2], df.iloc[-1]
         print(f"vs '{p.experiment}':  acc {c.acc-p.acc:+.3f}   f1 {c.f1-p.f1:+.3f}"
               f"   recall {c.rec-p.rec:+.3f}")
-    print(df.to_string(index=False))
+    # live diagram: F1 per experiment so far (green = current best)
+    fig, ax = plt.subplots(figsize=(8, 0.5 * len(df) + 0.6))
+    best = df["f1"].idxmax()
+    ax.barh(range(len(df)), df["f1"],
+            color=["#268a58" if i == best else "#9bbcd8" for i in range(len(df))])
+    for i, v in enumerate(df["f1"]):
+        ax.text(v, i, f" {v:.3f}", va="center", fontsize=9)
+    ax.set_yticks(range(len(df))); ax.set_yticklabels(df["experiment"], fontsize=8)
+    ax.invert_yaxis(); ax.set_xlim(0.7, 1.0); ax.set_xlabel("F1")
+    ax.set_title("F1 so far  (green = best)"); ax.grid(axis="x", alpha=0.3)
+    plt.tight_layout(); plt.show()
     return df
 
 def curves(h, title):
@@ -507,26 +517,52 @@ code(r"""best_model, best_proba, table = run(
     dropout=0.5, decay='cosine', batchnorm=True,
     class_weight={0: 1.0, 1: 2.5}, epochs=50)""")
 
-md("""### Progress across all experiments
+md("""### Results dashboard — everything as diagrams
 
-The line chart shows accuracy, F1 and recall improving from the SVM baseline
-through each change — the "flow of results" toward the best model.
+Three views of the whole comparison: a **heatmap** of every metric per
+experiment (colour = score), a **grouped bar chart**, and the **improvement-flow
+line chart** from the SVM baseline to the best model.
 """)
 code(r"""prog = pd.DataFrame(results)
-fig, ax = plt.subplots(figsize=(11, 4.5))
-x = range(len(prog))
+METR = ["acc", "prec", "rec", "f1", "auc"]
+names = prog["experiment"].tolist()
+
+# 1) heatmap of the comparison table
+fig, ax = plt.subplots(figsize=(8.5, 0.55 * len(prog) + 1.5))
+im = ax.imshow(prog[METR].values, cmap="YlGn", vmin=0.72, vmax=1.0, aspect="auto")
+ax.set_xticks(range(len(METR))); ax.set_xticklabels([m.upper() for m in METR])
+ax.set_yticks(range(len(prog))); ax.set_yticklabels(names, fontsize=8)
+for i in range(len(prog)):
+    for j, m in enumerate(METR):
+        v = prog[m].iloc[i]
+        ax.text(j, i, f"{v:.3f}", ha="center", va="center", fontsize=8.5,
+                color="white" if v > 0.9 else "black")
+ax.set_title("Comparison heatmap (greener = better)")
+plt.colorbar(im, fraction=0.03); plt.tight_layout(); plt.show()
+
+# 2) grouped bar chart
+x = np.arange(len(prog)); w = 0.16
+fig, ax = plt.subplots(figsize=(13, 5))
+colors = ["#2456a6", "#7a3ea6", "#d8791a", "#268a58", "#12a5b8"]
+for k, m in enumerate(METR):
+    ax.bar(x + k * w, prog[m], w, label=m.upper(), color=colors[k])
+ax.set_xticks(x + 2 * w); ax.set_xticklabels(names, rotation=25, ha="right", fontsize=8)
+ax.set_ylim(0.72, 1.0); ax.set_ylabel("score"); ax.legend(ncol=5, loc="lower right")
+ax.set_title("All metrics per experiment"); ax.grid(axis="y", alpha=0.3)
+plt.tight_layout(); plt.show()
+
+# 3) improvement-flow line chart
+fig, ax = plt.subplots(figsize=(12, 4.6))
 for col, c in [("acc", "#2456a6"), ("f1", "#268a58"), ("rec", "#d8791a")]:
-    ax.plot(x, prog[col], "o-", color=c, label=col)
+    ax.plot(x, prog[col], "o-", color=c, lw=2, label=col.upper())
     for xi, v in zip(x, prog[col]):
         ax.annotate(f"{v:.2f}", (xi, v), fontsize=8, ha="center", va="bottom")
-ax.set_xticks(list(x)); ax.set_xticklabels(prog["experiment"], rotation=25, ha="right",
-                                           fontsize=8)
-ax.set_ylabel("score"); ax.set_title("Improvement flow (higher is better)")
+ax.set_xticks(list(x)); ax.set_xticklabels(names, rotation=25, ha="right", fontsize=8)
+ax.set_ylabel("score"); ax.set_title("Improvement flow — baseline to best")
 ax.legend(); ax.grid(alpha=0.3); plt.tight_layout(); plt.show()
 
 best = prog.loc[prog["f1"].idxmax(), "experiment"]
 print(f"Best model by F1: {best}")
-print(prog.to_string(index=False))
 """)
 
 md(r"""### Final step — tune the decision threshold

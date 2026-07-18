@@ -1,13 +1,20 @@
 """D-MorphNet demo server — upload a face photo, get a real/morph verdict.
 
 Pipeline per request: BlazeFace face detection -> square 512x512 crop ->
-CLAHE + resize 528 -> EfficientNet-B6 GAP features (2304-d) -> StandardScaler
--> SVM (RBF) -> probability + verdict.
+CLAHE + resize -> EfficientNet backbone features (B6, plus B5 if the deployed
+artifact uses fusion) -> per-backbone StandardScaler -> calibrated SVM (RBF)
+-> probability + verdict.
 
-Run from the repo root (after `python app/export_model.py`):
+The model comes from ONE versioned artifact (app/model/pipeline.joblib),
+exported and verified by notebooks/Part3_Professional_Improvements.ipynb —
+the server never re-fits or hard-codes hyper-parameters.
+
+Run from the repo root:
     python app/server.py            # http://localhost:7860
 """
+import base64
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -24,24 +31,42 @@ from mediapipe.tasks.python import vision as mp_vision
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = Path(__file__).resolve().parent
-MODELS = ROOT / "models"
+sys.path.insert(0, str(ROOT / "src"))
 
-print("loading artifacts …")
-scaler = joblib.load(APP_DIR / "model" / "scaler.joblib")
-svm = joblib.load(APP_DIR / "model" / "svm.joblib")
-cfg = joblib.load(APP_DIR / "model" / "config.joblib")
+from dmorphnet.config import MODELS  # noqa: E402
+from dmorphnet.features import extract as extract_features  # noqa: E402
+from dmorphnet.preprocess import standardize  # noqa: E402
+
+print("loading pipeline artifact …")
+ART_PATH = APP_DIR / "model" / "pipeline.joblib"
+if ART_PATH.exists():
+    art = joblib.load(ART_PATH)
+else:  # legacy fallback (pre-Part 3 artifacts)
+    art = {
+        "version": 1,
+        "backbones": ["b6"],
+        "scalers": {"b6": joblib.load(APP_DIR / "model" / "scaler.joblib")},
+        "model": joblib.load(APP_DIR / "model" / "svm.joblib"),
+        "threshold": joblib.load(APP_DIR / "model" / "config.joblib")["threshold"],
+    }
+print(f"artifact v{art['version']} | backbones: {art['backbones']} "
+      f"| threshold: {art['threshold']:.2f}")
 
 detector = mp_vision.FaceDetector.create_from_options(mp_vision.FaceDetectorOptions(
     base_options=mp_python.BaseOptions(
         model_asset_path=str(MODELS / "blaze_face_short_range.tflite")),
     min_detection_confidence=0.5))
 
-print("loading EfficientNet-B6 backbone …")
+print("loading backbone(s) …")
 from tensorflow import keras  # deferred: slow import
-backbone = keras.applications.EfficientNetB6(
-    include_top=False, weights="imagenet", pooling="avg",
-    input_shape=(cfg["input_size"], cfg["input_size"], 3))
-_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+_CTOR = {"b0": keras.applications.EfficientNetB0,
+         "b5": keras.applications.EfficientNetB5,
+         "b6": keras.applications.EfficientNetB6}
+_SIZE = {"b0": 224, "b5": 456, "b6": 528}
+backbones = {name: _CTOR[name](include_top=False, weights="imagenet", pooling="avg",
+                               input_shape=(_SIZE[name], _SIZE[name], 3))
+             for name in art["backbones"]}
 
 
 def crop_face(img):
@@ -67,19 +92,17 @@ def predict(img):
     face = crop_face(img)
     if face is None:
         return {"error": "No face detected in the image. Upload a clear frontal face photo."}
-    lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
-    lab[:, :, 0] = _clahe.apply(lab[:, :, 0])
-    x = cv2.resize(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR),
-                   (cfg["input_size"],) * 2, interpolation=cv2.INTER_AREA)
-    feats = backbone.predict(x.astype(np.float32)[None], verbose=0)
-    p_morph = float(svm.predict_proba(scaler.transform(feats))[0, 1])
-    verdict = "MORPH" if p_morph > cfg["threshold"] else "REAL"
+    x = standardize(face)[None]
+    Z = np.hstack([art["scalers"][b].transform(
+                       extract_features(b, x, model=backbones[b]))
+                   for b in art["backbones"]])
+    p_morph = float(art["model"].predict_proba(Z)[0, 1])
+    verdict = "MORPH" if p_morph >= art["threshold"] else "REAL"
     ok, buf = cv2.imencode(".jpg", face, [cv2.IMWRITE_JPEG_QUALITY, 88])
-    import base64
     return {
         "verdict": verdict,
         "p_morph": round(p_morph, 4),
-        "threshold": cfg["threshold"],
+        "threshold": round(float(art["threshold"]), 3),
         "latency_s": round(time.time() - t0, 2),
         "face_crop": "data:image/jpeg;base64," + base64.b64encode(buf).decode() if ok else None,
     }

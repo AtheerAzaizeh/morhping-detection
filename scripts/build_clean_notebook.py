@@ -91,122 +91,207 @@ fig.suptitle("Real faces (FFHQ)"); plt.tight_layout(); plt.show()
 """)
 
 # ---------------------------------------------------------------- morph funcs
-md(r"""## 4 &middot; Morph generation (multiple methods)
+md(r"""## 4 &middot; Morph generation (Delaunay landmark morphing)
 
-Morphs are built by **landmark morphing**: detect 478 facial landmarks on both
-faces, warp each to the *average* face shape with a Delaunay triangle mesh, and
-blend. To train a detector that generalizes, we generate morphs in **several
-styles** rather than one:
+Morphs use the classic **Beier-Neely / Delaunay** landmark-morphing pipeline
+(Ferrara et al., 2014), exactly as in the project's `landmarks.py` / `morph.py`
+/ `app.py`: a MediaPipe **478-point** face mesh + 8 frame-boundary points, a
+**Delaunay triangulation**, a per-triangle **piecewise-affine warp** to the
+average face shape, and a cross-dissolve. Two output styles give a diverse
+training set:
 
-- **blend** &mdash; a full-frame cross-dissolve of both warped faces.
-- **splice** &mdash; the blended face is Poisson-cloned onto one photo, so hair and
-  background stay clean (how a real morph attack is assembled).
-- **varied strength** &mdash; the blend factor &alpha; is randomized (0.3&ndash;0.7),
-  so the morphs span "mostly A" to "mostly B".
+- **blend** &mdash; raw full-frame cross-dissolve (`frame_from=None`).
+- **splice** &mdash; the blended face is Poisson-cloned onto one subject's photo,
+  so hair and background stay clean (how a real morph attack is assembled).
 
-`average shape:  p&#772; = (1-&alpha;)&middot;p&#8321; + &alpha;&middot;p&#8322;`
+The blend factor &alpha; is randomized 0.3&ndash;0.7 during generation.
 """)
-code(r"""import mediapipe as mp
-from mediapipe.tasks.python import vision, BaseOptions
+code(r'''import mediapipe as mp
+import urllib.request
+from mediapipe.tasks.python import vision
+from mediapipe.tasks import python as mp_python
 
-_MODEL = "/content/face_landmarker.task"
-if not os.path.exists(_MODEL):
+# ---- MediaPipe FaceLandmarker (from landmarks.py) ----
+MODEL_PATH = "/content/face_landmarker.task"
+if not os.path.exists(MODEL_PATH):
     urllib.request.urlretrieve(
         "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-        "face_landmarker/float16/1/face_landmarker.task", _MODEL)
-_LM = vision.FaceLandmarker.create_from_options(
-    vision.FaceLandmarkerOptions(base_options=BaseOptions(model_asset_path=_MODEL),
-                                 num_faces=1))
+        "face_landmarker/float16/1/face_landmarker.task", MODEL_PATH)
 
-def landmarks(img):
-    # 478 face points + 8 frame-boundary points (whole image warps -> no black)
-    rgb = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    res = _LM.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
-    if not res.face_landmarks:
-        return None
-    h, w = img.shape[:2]
-    pts = np.array([[p.x * w, p.y * h] for p in res.face_landmarks[0]], np.float64)
-    pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)      # keep points inside the image
-    pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)      # (MediaPipe can return coords past the edge)
-    b = np.array([[0, 0], [w // 2, 0], [w - 1, 0], [0, h // 2], [w - 1, h // 2],
-                  [0, h - 1], [w // 2, h - 1], [w - 1, h - 1]], np.float64)
-    return np.vstack([pts, b])
+_options = vision.FaceLandmarkerOptions(
+    base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
+    running_mode=vision.RunningMode.IMAGE,
+    num_faces=1,
+    min_face_detection_confidence=0.3,
+    min_face_presence_confidence=0.3,
+)
+_landmarker = vision.FaceLandmarker.create_from_options(_options)
 
-def _triangles(points, size):
-    # Delaunay via Subdiv2D; map vertices back by NEAREST index (robust to the
-    # float rounding that makes exact-match lookups fail and produce black images)
-    sub = cv2.Subdiv2D((0, 0, size, size))
+
+def _boundary_points(w, h):
+    # 8 fixed boundary points (corners + edge midpoints) so the whole frame warps
+    return np.array([
+        [0, 0], [w // 2, 0], [w - 1, 0],
+        [0, h // 2], [w - 1, h // 2],
+        [0, h - 1], [w // 2, h - 1], [w - 1, h - 1],
+    ], dtype=np.float64)
+
+
+def get_landmarks(img_bgr, upscale=3):
+    """478 face-mesh points + 8 boundary points (upscaled coords) and the
+    upscaled image; (None, None) if no face. From landmarks.py."""
+    img_bgr = cv2.resize(img_bgr, None, fx=upscale, fy=upscale,
+                         interpolation=cv2.INTER_CUBIC)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+    result = _landmarker.detect(mp_image)
+    if not result.face_landmarks:
+        return None, None
+    h, w = img_bgr.shape[:2]
+    pts = np.array([[lm.x * w, lm.y * h] for lm in result.face_landmarks[0]],
+                   dtype=np.float64)
+    pts = np.vstack([pts, _boundary_points(w, h)])
+    return pts, img_bgr
+
+
+def delaunay_triangulation(points, size):
+    """Triangulate points inside a size=(w,h) rect -> index-triplets. From morph.py."""
+    w, h = size
+    points = points.copy()
+    points[:, 0] = np.clip(points[:, 0], 0, w - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, h - 1)
+    subdiv = cv2.Subdiv2D((0, 0, w, h))
     for p in points:
-        sub.insert((float(np.clip(p[0], 0, size - 1)),
-                    float(np.clip(p[1], 0, size - 1))))
-    P = np.asarray(points)
-    tris = []
-    for t in sub.getTriangleList():
-        vs = [(t[0], t[1]), (t[2], t[3]), (t[4], t[5])]
-        if all(0 <= x < size and 0 <= y < size for x, y in vs):
-            tri = [int(np.argmin((P[:, 0] - x) ** 2 + (P[:, 1] - y) ** 2)) for x, y in vs]
-            if len(set(tri)) == 3:
-                tris.append(tuple(tri))
-    return tris
+        subdiv.insert((float(p[0]), float(p[1])))
+    point_index = {(round(p[0], 1), round(p[1], 1)): i for i, p in enumerate(points)}
+    triangles = []
+    for t in subdiv.getTriangleList():
+        tri_pts = [(t[0], t[1]), (t[2], t[3]), (t[4], t[5])]
+        if not all(0 <= x < w and 0 <= y < h for x, y in tri_pts):
+            continue
+        idx = []
+        for x, y in tri_pts:
+            key = (round(x, 1), round(y, 1))
+            if key not in point_index:
+                dists = np.hypot(points[:, 0] - x, points[:, 1] - y)
+                idx.append(int(np.argmin(dists)))
+            else:
+                idx.append(point_index[key])
+        if len(set(idx)) == 3:
+            triangles.append(tuple(idx))
+    return triangles
 
-def _warp(src, dst, ts, td):
-    rs, rd = cv2.boundingRect(np.float32([ts])), cv2.boundingRect(np.float32([td]))
-    if min(rs[2], rs[3], rd[2], rd[3]) <= 0:
-        return
-    ts2 = [(p[0] - rs[0], p[1] - rs[1]) for p in ts]
-    td2 = [(p[0] - rd[0], p[1] - rd[1]) for p in td]
-    patch = src[rs[1]:rs[1] + rs[3], rs[0]:rs[0] + rs[2]]
-    if patch.shape[0] == 0 or patch.shape[1] == 0:   # triangle fell outside the image
-        return
-    M = cv2.getAffineTransform(np.float32(ts2), np.float32(td2))
-    try:
-        warped = cv2.warpAffine(patch, M, (rd[2], rd[3]), flags=cv2.INTER_LINEAR,
-                                borderMode=cv2.BORDER_REFLECT_101)
-    except cv2.error:
-        return
-    mask = np.zeros((rd[3], rd[2], 3), np.float32)
-    cv2.fillConvexPoly(mask, np.int32(td2), (1, 1, 1), cv2.LINE_AA)
-    roi = dst[rd[1]:rd[1] + rd[3], rd[0]:rd[0] + rd[2]]
-    dst[rd[1]:rd[1] + rd[3], rd[0]:rd[0] + rd[2]] = roi * (1 - mask) + warped * mask
 
-def _warp_all(img, src, dst, tris):
-    out = np.zeros_like(img, np.float32)
-    f = img.astype(np.float32)
-    for i, j, k in tris:
-        _warp(f, out, [src[i], src[j], src[k]], [dst[i], dst[j], dst[k]])
+def _warp_triangle(src_img, dst_img, tri_src, tri_dst):
+    """Affine-warp one triangular patch from src into dst. From morph.py."""
+    r_src = cv2.boundingRect(np.float32([tri_src]))
+    r_dst = cv2.boundingRect(np.float32([tri_dst]))
+    tri_src_rect = [(p[0] - r_src[0], p[1] - r_src[1]) for p in tri_src]
+    tri_dst_rect = [(p[0] - r_dst[0], p[1] - r_dst[1]) for p in tri_dst]
+    src_patch = src_img[r_src[1]:r_src[1] + r_src[3], r_src[0]:r_src[0] + r_src[2]]
+    if src_patch.size == 0 or r_dst[2] <= 0 or r_dst[3] <= 0:
+        return
+    mat = cv2.getAffineTransform(np.float32(tri_src_rect), np.float32(tri_dst_rect))
+    warped = cv2.warpAffine(src_patch, mat, (r_dst[2], r_dst[3]), None,
+                            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    mask = np.zeros((r_dst[3], r_dst[2], 3), dtype=np.float32)
+    cv2.fillConvexPoly(mask, np.int32(tri_dst_rect), (1.0, 1.0, 1.0), cv2.LINE_AA)
+    H, W = dst_img.shape[:2]
+    x0, y0, w0, h0 = r_dst
+    x1c, y1c = max(x0, 0), max(y0, 0)
+    x2c, y2c = min(x0 + w0, W), min(y0 + h0, H)
+    if x2c <= x1c or y2c <= y1c:
+        return
+    ox0, oy0 = x1c - x0, y1c - y0
+    ox1, oy1 = ox0 + (x2c - x1c), oy0 + (y2c - y1c)
+    warped_c = warped[oy0:oy1, ox0:ox1]
+    mask_c = mask[oy0:oy1, ox0:ox1]
+    dst_slice = dst_img[y1c:y2c, x1c:x2c]
+    dst_slice[:] = dst_slice * (1 - mask_c) + warped_c * mask_c
+
+
+def morph_images(img1, pts1, img2, pts2, alpha, triangles=None):
+    """Alpha-blended full-frame cross-dissolve morph. From morph.py."""
+    h, w = img1.shape[:2]
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    pts_morph = (1 - alpha) * pts1 + alpha * pts2
+    if triangles is None:
+        triangles = delaunay_triangulation(pts_morph, (w, h))
+    img1f = img1.astype(np.float32)
+    img2f = img2.astype(np.float32)
+    warped1 = np.zeros_like(img1f)
+    warped2 = np.zeros_like(img2f)
+    for (i, j, k) in triangles:
+        _warp_triangle(img1f, warped1,
+                       [tuple(pts1[i]), tuple(pts1[j]), tuple(pts1[k])],
+                       [tuple(pts_morph[i]), tuple(pts_morph[j]), tuple(pts_morph[k])])
+        _warp_triangle(img2f, warped2,
+                       [tuple(pts2[i]), tuple(pts2[j]), tuple(pts2[k])],
+                       [tuple(pts_morph[i]), tuple(pts_morph[j]), tuple(pts_morph[k])])
+    morphed = (1 - alpha) * warped1 + alpha * warped2
+    return np.clip(morphed, 0, 255).astype(np.uint8), triangles
+
+
+def _warp_to_shape(img, pts_src, pts_dst, triangles):
+    """Warp img from its landmark shape to a target shape. From app.py."""
+    imgf = img.astype(np.float32)
+    out = np.zeros_like(imgf)
+    for (i, j, k) in triangles:
+        _warp_triangle(imgf, out,
+                       [tuple(pts_src[i]), tuple(pts_src[j]), tuple(pts_src[k])],
+                       [tuple(pts_dst[i]), tuple(pts_dst[j]), tuple(pts_dst[k])])
     return out
 
-def morph(img1, img2, alpha=0.5, method="blend"):
-    # returns a morph image, or None if a face is missing / result is invalid
-    img1 = cv2.resize(img1, (MORPH_SIZE, MORPH_SIZE))
-    img2 = cv2.resize(img2, (MORPH_SIZE, MORPH_SIZE))
-    p1, p2 = landmarks(img1), landmarks(img2)
-    if p1 is None or p2 is None:
-        return None
-    pm = (1 - alpha) * p1 + alpha * p2
-    tris = _triangles(pm, MORPH_SIZE)
-    if len(tris) < 100:
-        return None
-    w1, w2 = _warp_all(img1, p1, pm, tris), _warp_all(img2, p2, pm, tris)
-    blend = np.clip((1 - alpha) * w1 + alpha * w2, 0, 255).astype(np.uint8)
-    if method == "blend":
-        out = blend
-    else:  # splice: blended face on a single clean background (from face 1)
-        frame = np.clip(w1, 0, 255).astype(np.uint8)
-        hull = cv2.convexHull(pm[:478].astype(np.int32))
-        m = np.zeros((MORPH_SIZE, MORPH_SIZE), np.uint8)
-        cv2.fillConvexPoly(m, hull, 255)
-        x, y, bw, bh = cv2.boundingRect(hull)
-        try:
-            out = cv2.seamlessClone(blend, frame, m, (x + bw // 2, y + bh // 2),
-                                    cv2.NORMAL_CLONE)
-        except cv2.error:
-            out = blend
-    return None if out.mean() < 5 else out          # reject black/failed morphs
 
-# example: one face pair rendered with both methods
+def render_morph(up_a, pts_a, up_b, pts_b, alpha, frame_from, triangles=None):
+    """frame_from None -> raw cross-dissolve; 'A'/'B' -> face-only blend +
+    Poisson seamlessClone onto that subject's photo. From app.py."""
+    if frame_from is None:
+        return morph_images(up_a, pts_a, up_b, pts_b, alpha, triangles=triangles)
+    h, w = up_a.shape[:2]
+    pts_m = (1 - alpha) * pts_a + alpha * pts_b
+    if triangles is None:
+        triangles = delaunay_triangulation(pts_m, (w, h))
+    warped_a = _warp_to_shape(up_a, pts_a, pts_m, triangles)
+    warped_b = _warp_to_shape(up_b, pts_b, pts_m, triangles)
+    blend = (1 - alpha) * warped_a + alpha * warped_b
+    frame = warped_a if frame_from == "A" else warped_b
+    hull = cv2.convexHull(pts_m[:478].astype(np.int32))
+    mask = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(mask, hull, 255)
+    blend8 = np.clip(blend, 0, 255).astype(np.uint8)
+    frame8 = np.clip(frame, 0, 255).astype(np.uint8)
+    x, y, bw, bh = cv2.boundingRect(hull)
+    try:
+        out = cv2.seamlessClone(blend8, frame8, mask,
+                                (x + bw // 2, y + bh // 2), cv2.NORMAL_CLONE)
+    except cv2.error:
+        soft = cv2.GaussianBlur(cv2.erode(mask, np.ones((15, 15), np.uint8)),
+                                (31, 31), 0)
+        m3 = (soft.astype(np.float32) / 255.0)[..., None]
+        out = np.clip(blend * m3 + frame * (1 - m3), 0, 255).astype(np.uint8)
+    return out, triangles
+
+
+def morph(img1, img2, alpha=0.5, method="blend"):
+    """Dataset glue: landmark both faces on a shared canvas, render a morph,
+    return it at MORPH_SIZE (or None if a face is missing / result invalid)."""
+    pa, up_a = get_landmarks(cv2.resize(img1, (MORPH_SIZE, MORPH_SIZE)), upscale=2)
+    pb, up_b = get_landmarks(cv2.resize(img2, (MORPH_SIZE, MORPH_SIZE)), upscale=2)
+    if pa is None or pb is None:
+        return None
+    frame_from = None if method == "blend" else random.choice(["A", "B"])
+    out, _ = render_morph(up_a, pa, up_b, pb, alpha, frame_from)
+    if out is None:
+        return None
+    out = cv2.resize(out, (MORPH_SIZE, MORPH_SIZE))
+    return None if out.mean() < 5 else out
+
+
+# example: one pair rendered as both styles
 A, B = cv2.imread(face_paths[0]), cv2.imread(face_paths[1])
-ex_blend  = morph(A, B, 0.5, "blend")
+ex_blend = morph(A, B, 0.5, "blend")
 ex_splice = morph(A, B, 0.5, "splice")
 fig, ax = plt.subplots(1, 4, figsize=(13, 3.3))
 for a, im, t in zip(ax, [A, B, ex_blend, ex_splice],
@@ -214,7 +299,7 @@ for a, im, t in zip(ax, [A, B, ex_blend, ex_splice],
     a.imshow(cv2.cvtColor(cv2.resize(im, (MORPH_SIZE, MORPH_SIZE)), cv2.COLOR_BGR2RGB))
     a.set_title(t); a.axis("off")
 plt.tight_layout(); plt.show()
-""")
+''')
 
 # ---------------------------------------------------------------- build dataset
 md("""## 5 · Build the dataset and splits

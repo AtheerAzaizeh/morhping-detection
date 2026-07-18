@@ -222,15 +222,15 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding-top:22px;color:v
   <div class="diagram">
   <pre class="mermaid">
 flowchart LR
-  A["Face image<br/>I &#8712; R^(H&#215;W&#215;3)"] --> B["Preprocess<br/>resize 528&#215;528<br/>+ CLAHE"]
-  B --> C["EfficientNet-B6<br/>compound scaling<br/>+ BatchNorm + Swish"]
-  C --> D["Global Average<br/>Pooling<br/>F &#8712; R^2304"]
-  D --> E{"Classifier"}
+  A["Face image I (HxWx3)"] --> B["Preprocess: resize 528 + CLAHE"]
+  B --> C["EfficientNet-B6 backbone"]
+  C --> D["Global Average Pooling F (2304-d)"]
+  D --> E{"Classifier head"}
   E -->|"Option A"| F1["FC + Softmax"]
-  E -->|"Option B ✓"| F2["SVM<br/>w&#7488;F + b"]
-  F2 --> G["Decision<br/>ŷ = sign(w&#7488;F+b)"]
-  G --> H(["Real (0)"])
-  G --> J(["Morph (1)"])
+  E -->|"Option B (chosen)"| F2["SVM: w.F + b"]
+  F2 --> G["Decision: sign(w.F + b)"]
+  G --> H(["Real - class 0"])
+  G --> J(["Morph - class 1"])
   style C fill:#d4eef2,stroke:#12a5b8,stroke-width:2px
   style F2 fill:#fbe3c9,stroke:#d8791a,stroke-width:2px
   style J fill:#f7d3ce,stroke:#c9463c
@@ -247,25 +247,25 @@ flowchart LR
   <pre class="mermaid">
 flowchart TB
   subgraph DATA["Data layer"]
-    K["Kaggle / CelebA<br/>202,599 real faces"]
-    ID["identity file<br/>(fair split)"]
-    MG["Morph generator<br/>landmark + Poisson"]
+    K["Kaggle CelebA - 202599 faces"]
+    ID["Identity file - fair split"]
+    MG["Morph generator - landmark + Poisson"]
   end
   subgraph FEAT["Feature layer"]
-    PP["Preprocessor<br/>CLAHE + resize"]
-    B6["EfficientNet-B6<br/>(frozen / fine-tuned)"]
-    NPZ[("feature cache<br/>.npz")]
+    PP["Preprocessor - CLAHE + resize"]
+    B6["EfficientNet-B6 - frozen or fine-tuned"]
+    NPZ[("Feature cache .npz")]
   end
   subgraph DEC["Decision layer"]
     SC["StandardScaler"]
-    SVM["SVM (RBF / linear)"]
+    SVM["SVM - RBF or linear"]
     TH["Threshold + calibration"]
   end
   K --> MG --> PP
   K --> PP
   ID --> MG
   PP --> B6 --> NPZ --> SC --> SVM --> TH
-  TH --> OUT(["Real / Morph + confidence"])
+  TH --> OUT(["Real or Morph + confidence"])
   style B6 fill:#d4eef2,stroke:#12a5b8
   style SVM fill:#fbe3c9,stroke:#d8791a
   </pre>
@@ -284,24 +284,24 @@ flowchart TB
   <div class="diagram">
   <pre class="mermaid">
 flowchart TD
-  S([Start · enable GPU]) --> P1["Part 1 · Config<br/>DEMO flag, counts, seeds"]
-  P1 --> P2["Part 2 · Data<br/>download CelebA + identities"]
-  P2 --> P3["Part 3 · Morph generation<br/>realistic seamless morphs"]
-  P3 --> CK1{Checkpoint<br/>every 2000?}
-  CK1 -->|yes| DR[(Drive)]
-  CK1 --> P4["Part 4 · Preprocess<br/>528 + CLAHE + augment"]
-  P4 --> P5["Part 5 · Features<br/>EfficientNet-B6 &#8594; 2304-d"]
-  P5 --> FT{DO_FINETUNE?}
-  FT -->|yes| P5b["Fine-tune block7+top<br/>lr = 1e-5, re-extract"]
+  S(["Start - enable GPU"]) --> P1["Part 1: Config - DEMO, counts, seeds"]
+  P1 --> P2["Part 2: Data - download CelebA + identities"]
+  P2 --> P3["Part 3: Morph generation - seamless morphs"]
+  P3 --> CK1{"Checkpoint every 2000?"}
+  CK1 -->|yes| DR[("Drive")]
+  CK1 --> P4["Part 4: Preprocess 528 + CLAHE + augment"]
+  P4 --> P5["Part 5: Features EfficientNet-B6 to 2304-d"]
+  P5 --> FT{"DO_FINETUNE?"}
+  FT -->|yes| P5b["Fine-tune block7 + top - lr 1e-5"]
   FT -->|no| P6
-  P5b --> P6["Part 6 · SVM<br/>tune C, fit w,b"]
-  P6 --> P7["Part 7 · Results<br/>confusion + ROC/AUC"]
-  P7 --> P8["Part 8 · Threshold opt"]
-  P8 --> P9["Part 9 · Arch compare"]
-  P9 --> P10["Part 10 · Real-time<br/>upload + multi-face"]
-  P10 --> P11["Part 11 · Save models"]
-  P11 --> P12["Part 12 · Improvements<br/>before / after"]
-  P12 --> E([Done])
+  P5b --> P6["Part 6: SVM - tune C, fit w and b"]
+  P6 --> P7["Part 7: Results - confusion + ROC/AUC"]
+  P7 --> P8["Part 8: Threshold optimization"]
+  P8 --> P9["Part 9: Architecture compare"]
+  P9 --> P10["Part 10: Real-time - upload + multi-face"]
+  P10 --> P11["Part 11: Save models"]
+  P11 --> P12["Part 12: Improvements - before/after"]
+  P12 --> E(["Done"])
   style P3 fill:#fbe3c9,stroke:#d8791a
   style P5 fill:#d4eef2,stroke:#12a5b8
   style P6 fill:#fbe3c9,stroke:#d8791a
@@ -510,17 +510,17 @@ sequenceDiagram
   participant B6 as EfficientNet-B6
   participant SVM as SVM + threshold
   User->>UI: upload image
-  UI->>Det: detect_face_boxes(img)
-  Det-->>UI: [box per face]
+  UI->>Det: detect face boxes
+  Det-->>UI: list of boxes
   loop each face
-    UI->>Pre: standardize(crop) 528+CLAHE
+    UI->>Pre: standardize crop 528 + CLAHE
     Pre-->>UI: processed face
-    UI->>B6: predict &#8594; F (2304-d)
+    UI->>B6: extract F (2304-d)
     B6-->>UI: feature vector
-    UI->>SVM: s = w&#7488;F + b
+    UI->>SVM: s = w.F + b
     SVM-->>UI: label + sigmoid confidence
   end
-  UI-->>User: MORPH / REAL boxes + scores
+  UI-->>User: MORPH or REAL boxes + scores
   </pre>
   <div class="cap">Fig. 4 — Runtime sequence for real-time detection with multi-face support.</div>
   </div>

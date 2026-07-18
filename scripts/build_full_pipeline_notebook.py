@@ -64,6 +64,12 @@ DO_FINETUNE = True         # Fine-tune top B6 layers (Part 5) — reduces overfi
 RUN_COMPARISONS = False    # B0/B5/B6 comparison — Table 2 (Part 9)
 SAVE_TO_DRIVE = True       # Save final models to Drive (Part 11)
 
+# Fresh start: True = DELETE the old dataset, processed images, features AND
+# the Drive checkpoints, then regenerate everything from scratch with the
+# current (Delaunay) morph algorithm. Set True for THIS restart; set back to
+# False before re-running so a mid-run disconnect can resume instead of wiping.
+FRESH_START = True
+
 # Automatic Drive checkpoints during long stages — essential for the full run
 # so a Colab disconnect never loses progress (resume works even on a new VM)
 CHECKPOINT_TO_DRIVE = not DEMO
@@ -146,6 +152,40 @@ if CHECKPOINT_TO_DRIVE:
     print("Checkpoints directory:", CKPT_DIR)
 else:
     print("Drive checkpointing disabled (DEMO mode)")
+""")
+
+md("""### Fresh start — delete the old dataset before regenerating
+
+Because the pipeline auto-resumes, an old dataset would be **reused** and the new
+Delaunay morphs would never be generated. With `FRESH_START = True` this cell
+deletes the previous local data **and** the Drive checkpoints so everything is
+rebuilt from scratch.
+
+> ⚠️ Run this **once** to restart. After generation begins, set `FRESH_START =
+> False` in Part 1 so that a mid-run Colab disconnect resumes instead of wiping.
+""")
+code(r"""if FRESH_START:
+    # local: wipe generated dataset, processed images, extracted features
+    for d in [RAW_DIR, PROC_DIR, FEAT_DIR]:
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d, exist_ok=True)
+    removed = 0
+    # Drive: remove morph checkpoints, processed cache, feature caches, labels
+    if CKPT_DIR and os.path.isdir(CKPT_DIR):
+        for f in glob.glob(os.path.join(CKPT_DIR, "*")):
+            try:
+                if os.path.isdir(f):
+                    shutil.rmtree(f, ignore_errors=True)
+                else:
+                    os.remove(f)
+                removed += 1
+            except OSError:
+                pass
+    print(f"🧹 FRESH_START: cleared local dataset/processed/features"
+          + (f" and {removed} Drive checkpoint files" if CKPT_DIR else ""))
+    print("   The new Delaunay morph algorithm will regenerate everything.")
+else:
+    print("FRESH_START = False — existing data/checkpoints will be resumed.")
 """)
 
 # ================================================================ PART 2

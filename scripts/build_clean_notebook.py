@@ -91,14 +91,20 @@ fig.suptitle("Real faces (FFHQ)"); plt.tight_layout(); plt.show()
 """)
 
 # ---------------------------------------------------------------- morph funcs
-md(r"""## 4 · Morph generation
+md(r"""## 4 &middot; Morph generation (multiple methods)
 
-Morphs are created by **landmark-based morphing** (the standard face-morphing
-recipe): find 478 facial landmarks on both faces, warp each to the *average*
-shape with a Delaunay triangle mesh, blend the two, and seamlessly clone the
-blended face onto one photo so hair and background stay clean.
+Morphs are built by **landmark morphing**: detect 478 facial landmarks on both
+faces, warp each to the *average* face shape with a Delaunay triangle mesh, and
+blend. To train a detector that generalizes, we generate morphs in **several
+styles** rather than one:
 
-`average shape:  p̄ = ½·p₁ + ½·p₂`
+- **blend** &mdash; a full-frame cross-dissolve of both warped faces.
+- **splice** &mdash; the blended face is Poisson-cloned onto one photo, so hair and
+  background stay clean (how a real morph attack is assembled).
+- **varied strength** &mdash; the blend factor &alpha; is randomized (0.3&ndash;0.7),
+  so the morphs span "mostly A" to "mostly B".
+
+`average shape:  p&#772; = (1-&alpha;)&middot;p&#8321; + &alpha;&middot;p&#8322;`
 """)
 code(r"""import mediapipe as mp
 from mediapipe.tasks.python import vision, BaseOptions
@@ -113,15 +119,33 @@ _LM = vision.FaceLandmarker.create_from_options(
                                  num_faces=1))
 
 def landmarks(img):
-    # 478 face points + 4 corners; None if no face
+    # 478 face points + 8 frame-boundary points (whole image warps -> no black)
     rgb = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     res = _LM.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
     if not res.face_landmarks:
         return None
     h, w = img.shape[:2]
     pts = np.array([[p.x * w, p.y * h] for p in res.face_landmarks[0]], np.float64)
-    corners = np.array([[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]], np.float64)
-    return np.vstack([pts, corners])
+    b = np.array([[0, 0], [w // 2, 0], [w - 1, 0], [0, h // 2], [w - 1, h // 2],
+                  [0, h - 1], [w // 2, h - 1], [w - 1, h - 1]], np.float64)
+    return np.vstack([pts, b])
+
+def _triangles(points, size):
+    # Delaunay via Subdiv2D; map vertices back by NEAREST index (robust to the
+    # float rounding that makes exact-match lookups fail and produce black images)
+    sub = cv2.Subdiv2D((0, 0, size, size))
+    for p in points:
+        sub.insert((float(np.clip(p[0], 0, size - 1)),
+                    float(np.clip(p[1], 0, size - 1))))
+    P = np.asarray(points)
+    tris = []
+    for t in sub.getTriangleList():
+        vs = [(t[0], t[1]), (t[2], t[3]), (t[4], t[5])]
+        if all(0 <= x < size and 0 <= y < size for x, y in vs):
+            tri = [int(np.argmin((P[:, 0] - x) ** 2 + (P[:, 1] - y) ** 2)) for x, y in vs]
+            if len(set(tri)) == 3:
+                tris.append(tuple(tri))
+    return tris
 
 def _warp(src, dst, ts, td):
     rs, rd = cv2.boundingRect(np.float32([ts])), cv2.boundingRect(np.float32([td]))
@@ -138,49 +162,49 @@ def _warp(src, dst, ts, td):
     roi = dst[rd[1]:rd[1] + rd[3], rd[0]:rd[0] + rd[2]]
     dst[rd[1]:rd[1] + rd[3], rd[0]:rd[0] + rd[2]] = roi * (1 - mask) + warped * mask
 
-def morph(img1, img2):
-    # blend two faces into one seamless morph; None on failure
+def _warp_all(img, src, dst, tris):
+    out = np.zeros_like(img, np.float32)
+    f = img.astype(np.float32)
+    for i, j, k in tris:
+        _warp(f, out, [src[i], src[j], src[k]], [dst[i], dst[j], dst[k]])
+    return out
+
+def morph(img1, img2, alpha=0.5, method="blend"):
+    # returns a morph image, or None if a face is missing / result is invalid
     img1 = cv2.resize(img1, (MORPH_SIZE, MORPH_SIZE))
     img2 = cv2.resize(img2, (MORPH_SIZE, MORPH_SIZE))
     p1, p2 = landmarks(img1), landmarks(img2)
     if p1 is None or p2 is None:
         return None
-    pm = (1 - ALPHA) * p1 + ALPHA * p2
-    rect = (0, 0, MORPH_SIZE, MORPH_SIZE)
-    sub = cv2.Subdiv2D(rect)
-    for p in pm:
-        sub.insert((float(np.clip(p[0], 0, MORPH_SIZE - 1)),
-                    float(np.clip(p[1], 0, MORPH_SIZE - 1))))
-    idx = {(round(x, 1), round(y, 1)): i for i, (x, y) in enumerate(pm)}
-    tris = []
-    for t in sub.getTriangleList():
-        vs = [(t[0], t[1]), (t[2], t[3]), (t[4], t[5])]
-        if all(0 <= x < MORPH_SIZE and 0 <= y < MORPH_SIZE for x, y in vs):
-            tri = [idx.get((round(x, 1), round(y, 1))) for x, y in vs]
-            if None not in tri and len(set(tri)) == 3:
-                tris.append(tri)
-    w1, w2 = np.zeros_like(img1, np.float32), np.zeros_like(img2, np.float32)
-    for i, j, k in tris:
-        _warp(img1.astype(np.float32), w1, [p1[i], p1[j], p1[k]], [pm[i], pm[j], pm[k]])
-        _warp(img2.astype(np.float32), w2, [p2[i], p2[j], p2[k]], [pm[i], pm[j], pm[k]])
-    blend = np.clip((1 - ALPHA) * w1 + ALPHA * w2, 0, 255).astype(np.uint8)
-    frame = np.clip(w1, 0, 255).astype(np.uint8)              # background from face 1
-    hull = cv2.convexHull(pm[:478].astype(np.int32))
-    m = np.zeros((MORPH_SIZE, MORPH_SIZE), np.uint8); cv2.fillConvexPoly(m, hull, 255)
-    x, y, bw, bh = cv2.boundingRect(hull)
-    try:
-        return cv2.seamlessClone(blend, frame, m, (x + bw // 2, y + bh // 2),
-                                 cv2.NORMAL_CLONE)
-    except cv2.error:
-        return blend
+    pm = (1 - alpha) * p1 + alpha * p2
+    tris = _triangles(pm, MORPH_SIZE)
+    if len(tris) < 100:
+        return None
+    w1, w2 = _warp_all(img1, p1, pm, tris), _warp_all(img2, p2, pm, tris)
+    blend = np.clip((1 - alpha) * w1 + alpha * w2, 0, 255).astype(np.uint8)
+    if method == "blend":
+        out = blend
+    else:  # splice: blended face on a single clean background (from face 1)
+        frame = np.clip(w1, 0, 255).astype(np.uint8)
+        hull = cv2.convexHull(pm[:478].astype(np.int32))
+        m = np.zeros((MORPH_SIZE, MORPH_SIZE), np.uint8)
+        cv2.fillConvexPoly(m, hull, 255)
+        x, y, bw, bh = cv2.boundingRect(hull)
+        try:
+            out = cv2.seamlessClone(blend, frame, m, (x + bw // 2, y + bh // 2),
+                                    cv2.NORMAL_CLONE)
+        except cv2.error:
+            out = blend
+    return None if out.mean() < 5 else out          # reject black/failed morphs
 
-# example
-ex = morph(cv2.imread(face_paths[0]), cv2.imread(face_paths[1]))
-fig, ax = plt.subplots(1, 3, figsize=(9, 3.2))
-for a, im, t in zip(ax, [face_paths[0], face_paths[1], None],
-                    ["identity A", "identity B", "morph (A+B)"]):
-    img = ex if im is None else cv2.imread(im)
-    a.imshow(cv2.cvtColor(cv2.resize(img, (MORPH_SIZE, MORPH_SIZE)), cv2.COLOR_BGR2RGB))
+# example: one face pair rendered with both methods
+A, B = cv2.imread(face_paths[0]), cv2.imread(face_paths[1])
+ex_blend  = morph(A, B, 0.5, "blend")
+ex_splice = morph(A, B, 0.5, "splice")
+fig, ax = plt.subplots(1, 4, figsize=(13, 3.3))
+for a, im, t in zip(ax, [A, B, ex_blend, ex_splice],
+                    ["identity A", "identity B", "morph (blend)", "morph (splice)"]):
+    a.imshow(cv2.cvtColor(cv2.resize(im, (MORPH_SIZE, MORPH_SIZE)), cv2.COLOR_BGR2RGB))
     a.set_title(t); a.axis("off")
 plt.tight_layout(); plt.show()
 """)
@@ -197,7 +221,9 @@ morph_paths, src = [], iter(range(len(face_paths)))
 pbar = tqdm(total=N_MORPH, desc="generating morphs")
 i = N_REAL                                   # reals use the first N_REAL faces
 while len(morph_paths) < N_MORPH and i + 1 < len(face_paths):
-    m = morph(cv2.imread(face_paths[i]), cv2.imread(face_paths[i + 1]))
+    m = morph(cv2.imread(face_paths[i]), cv2.imread(face_paths[i + 1]),
+              alpha=random.uniform(0.3, 0.7),
+              method=random.choice(["blend", "splice"]))
     i += 2
     if m is None:
         continue

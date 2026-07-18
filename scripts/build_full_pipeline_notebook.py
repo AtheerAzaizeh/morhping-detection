@@ -21,7 +21,7 @@ This notebook runs the complete D-MorphNet pipeline **at full scale (45,000 imag
 |---|---|
 | 1 | Global configuration (full-scale / quick demo switch) |
 | 2 | Download real images + identity file (fully automatic) |
-| 3 | **Delaunay** morph generation (Subdiv2D triangulation + piecewise-affine warp) + review + identity-disjoint splits |
+| 2-3 | FFHQ real faces + **Delaunay** morph generation (Subdiv2D + piecewise-affine warp) |
 | 4 | Preprocessing (528×528 + CLAHE) and data augmentation |
 | 5 | EfficientNet-B6 feature extraction (+ optional fine-tuning) |
 | 6 | SVM training and decision-function verification |
@@ -189,193 +189,475 @@ else:
 """)
 
 # ================================================================ PART 2
-md("""## Part 2 — Load a ready-made morph-attack dataset (Kaggle)
+md("""## Part 2 — Real faces from FFHQ (Flickr-Faces-HQ)
 
-Instead of generating morphs, this loads a **ready-made face-morphing-attack
-dataset** (bona-fide *real* + *morphed* images) straight from Kaggle. Set
-`KAGGLE_MORPH_SLUG` to your dataset (`owner/name`).
+The **real / bona-fide** class is FFHQ — 70,000 high-quality real faces. Morphs
+are then generated from FFHQ pairs (Part 3), which is exactly how the FFHQ-Morphs
+benchmark is built.
 
-> ⚠️ It must be a real **morphing-attack** dataset — with both genuine and
-> morphed faces. (Note: `chiragsaipanuganti/morph` is *MORPH-II*, an aging
-> mugshot database of **real** faces only — not usable here.) The loader below
-> auto-detects the structure and **refuses to continue unless it finds both a
-> real and a morph class**, so a wrong dataset fails loudly instead of silently
-> mislabelling real faces as morphs.
+We use a **256px Kaggle mirror** (Colab-feasible). The official NVIDIA 1024px set
+is 89 GB over Google Drive and will not finish on Colab; images are resized to
+528 for EfficientNet-B6 anyway, so 256px is plenty. To use full-res instead,
+download it with NVIDIA's `download_ffhq.py` and point `FFHQ_DIR` at it.
 """)
-code(r'''import kagglehub, glob
-from collections import Counter
+code(r'''import kagglehub, os, glob
 
-# ================== SET THIS ==================
-KAGGLE_MORPH_SLUG = ""          # e.g. "someowner/face-morph-attack-dataset"
-# Optional explicit folder-name overrides if the auto keyword detection misses:
-MORPH_DIRS = []                 # e.g. ["morphed", "attack"]
-REAL_DIRS  = []                 # e.g. ["bonafide", "genuine"]
-REAL_FALLBACK_CELEBA = True     # if dataset has morphs but no real class, pull reals from CelebA
-# ==============================================
+FFHQ_SLUG = "xhlulu/flickrfaceshq-dataset-nvidia-resized-256px"   # 256px mirror
+FFHQ_DIR  = ""     # optional: set to a local FFHQ folder to skip the download
 
-assert KAGGLE_MORPH_SLUG, ("Set KAGGLE_MORPH_SLUG to your Kaggle morph-attack "
-                           "dataset (owner/name) before running.")
-
-DS_ROOT = kagglehub.dataset_download(KAGGLE_MORPH_SLUG)
-print("Downloaded to:", DS_ROOT)
-
-EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-all_imgs = [p for p in glob.glob(os.path.join(DS_ROOT, "**", "*"), recursive=True)
-            if p.lower().endswith(EXTS)]
-print("Total image files:", len(all_imgs))
-
-# Show the folder layout so you can see how it is organized
-rel = [os.path.relpath(p, DS_ROOT) for p in all_imgs]
-print("Top-level folders:", dict(Counter(r.split(os.sep)[0] for r in rel)))
-print("Second-level (sample):",
-      dict(list(Counter(os.sep.join(r.split(os.sep)[:2]) for r in rel).items())[:25]))
+DATA_ROOT = FFHQ_DIR if FFHQ_DIR else kagglehub.dataset_download(FFHQ_SLUG)
+all_jpgs = [p for p in glob.glob(os.path.join(DATA_ROOT, "**", "*"), recursive=True)
+            if p.lower().endswith((".png", ".jpg", ".jpeg"))]
+# basename -> full path (FFHQ names are unique, even across subfolders)
+img2path = {os.path.basename(p): p for p in all_jpgs}
+IMG_DIR = os.path.dirname(all_jpgs[0])
+print("FFHQ real faces:", len(all_jpgs), "| folder:", IMG_DIR)
 ''')
 
-md("""### 2.1 Classify each image as real vs morph
+md("""### 2.1 Identities (FFHQ has distinct people)
 
-Detection order: (1) explicit `MORPH_DIRS` / `REAL_DIRS` folder names if you set
-them, else (2) keyword match on the path. Adjust the keyword lists or the
-explicit-dir lists above if your dataset uses different names.
+FFHQ contains distinct individuals with no repeated identity, so **each image is
+its own identity**. This makes the train/val/test split identity-clean by
+construction and guarantees every generated morph pair is two different people.
 """)
 code(r'''import pandas as pd
 
-MORPH_KW = ("morph", "attack", "fake", "spoof", "fraud", "manipulat")
-REAL_KW  = ("real", "genuine", "bona", "bonafide", "live", "orig",
-            "authentic", "reference", "probe", "raw")
-
-def _has(path_low, names):
-    parts = path_low.split(os.sep)
-    return any(any(n.lower() == part or n.lower() in part for part in parts) for n in names)
-
-def classify(path):
-    low = os.path.relpath(path, DS_ROOT).lower()
-    if MORPH_DIRS and _has(low, MORPH_DIRS): return "morph"
-    if REAL_DIRS  and _has(low, REAL_DIRS):  return "real"
-    if any(k in low for k in MORPH_KW): return "morph"
-    if any(k in low for k in REAL_KW):  return "real"
-    return None
-
-records = [{"path": p, "label": classify(p)} for p in all_imgs]
-df = pd.DataFrame([r for r in records if r["label"]])
-unlabeled = sum(1 for r in records if r["label"] is None)
-print("Detected:", (df["label"].value_counts().to_dict() if not df.empty else {}),
-      "| unlabeled:", unlabeled)
-
-# If a CSV of labels ships with the dataset, surface it so you can map manually
-if df.empty or df["label"].nunique() < 2:
-    csvs = glob.glob(os.path.join(DS_ROOT, "**", "*.csv"), recursive=True)
-    print("Folder/keyword detection inconclusive. CSV files present:",
-          [os.path.basename(c) for c in csvs])
-    print("-> Set MORPH_DIRS / REAL_DIRS to the exact folder names, or tell me "
-          "the CSV label column and I'll wire it in.")
-
-# Optional: fill the real class from CelebA if the dataset only has morphs
-if (not df.empty) and df["label"].nunique() == 1 and "morph" in set(df["label"]) \
-        and REAL_FALLBACK_CELEBA:
-    print("No real class in the morph dataset -> pulling bona-fide faces from CelebA ...")
-    celeba = kagglehub.dataset_download("jessicali9530/celeba-dataset")
-    reals = glob.glob(os.path.join(celeba, "**", "*.jpg"), recursive=True)
-    n_need = min(len(df), len(reals))
-    df = pd.concat([df, pd.DataFrame({"path": reals[:n_need],
-                                      "label": ["real"] * n_need})],
-                   ignore_index=True)
-    print("After CelebA fallback:", df["label"].value_counts().to_dict())
-
-assert not df.empty and set(df["label"]) >= {"real", "morph"}, (
-    "Dataset does not expose BOTH a real and a morph class. "
-    "Set MORPH_DIRS/REAL_DIRS explicitly, enable REAL_FALLBACK_CELEBA, or "
-    "pick a proper morph-attack dataset.")
-print("\\nUsable:", df["label"].value_counts().to_dict())
+names = sorted(os.path.basename(p) for p in all_jpgs)
+ident = pd.DataFrame({"image_id": names, "identity": np.arange(len(names))})
+print("images:", len(ident), "| distinct identities:", ident["identity"].nunique())
+ident.head()
 ''')
 
 # ================================================================ PART 3
-md("""## Part 3 — Build train / val / test splits from the dataset
+md("""## Part 3 — Dataset Construction and Morph Generation
 
-If the dataset already ships `train/` `val/` `test/` folders they are honoured;
-otherwise each class is split by the paper's ratios (~67 / 29 / 4). Images are
-copied into `RAW_DIR/<split>/<class>/` (long side capped at 512 px) so the rest
-of the pipeline runs unchanged.
+### 3.1 Identity split and real image selection
 
-> Identity separation: ready-made datasets rarely expose person IDs, so this uses
-> an image-level split. If your dataset encodes identity in the filename, tell me
-> the pattern and I'll switch to an identity-disjoint split.
+Every person goes with ALL of their images into exactly one split (train OR val OR
+test) — morphs are later generated only from people inside the same split, so no
+identity ever leaks between splits.
 """)
-code(r'''# detect a pre-existing split from the path (train/val/test/dev/eval)
-SPLIT_ALIASES = {"train": "train", "training": "train",
-                 "val": "val", "valid": "val", "validation": "val", "dev": "val",
-                 "test": "test", "testing": "test", "eval": "test"}
+code(r"""by_id = ident.groupby("identity")["image_id"].apply(list).to_dict()
+img2id = dict(zip(ident["image_id"], ident["identity"]))
 
-def path_split(path):
-    for part in os.path.relpath(path, DS_ROOT).lower().split(os.sep):
-        if part in SPLIT_ALIASES:
-            return SPLIT_ALIASES[part]
-    return None
+available = {os.path.basename(p) for p in all_jpgs}
+by_id = {k: [f for f in v if f in available] for k, v in by_id.items()}
+by_id = {k: v for k, v in by_id.items() if v}
 
-df["dsplit"] = df["path"].map(path_split)
-has_native = df["dsplit"].notna().mean() > 0.8      # dataset already split?
+identities = list(by_id)
+random.shuffle(identities)
 
-rng = np.random.RandomState(SEED)
-assign = {s: {c: [] for c in CLASSES} for s in SPLIT_NAMES}
+selected, id_iter = {}, iter(identities)
+for split, tgt in SPLITS.items():
+    images, sids = [], set()
+    while len(images) < tgt["real"]:
+        pid = next(id_iter, None)
+        if pid is None:                     # guard: identities exhausted
+            raise RuntimeError("Not enough identities for the requested targets")
+        sids.add(pid)
+        images.extend(by_id[pid])
+    selected[split] = {"identities": sids, "images": images[: tgt["real"]]}
+    print(f"{split}: {len(selected[split]['images'])} real images "
+          f"from {len(sids)} identities")
 
-if has_native:
-    print("Using the dataset's own train/val/test folders.")
-    for _, r in df.iterrows():
-        s = r["dsplit"] or "train"
-        assign[s][r["label"]].append(r["path"])
-else:
-    print("No native split -> splitting each class by paper ratios.")
-    frac = {c: {s: SPLITS[s][c] / sum(SPLITS[x][c] for x in SPLIT_NAMES)
-                for s in SPLIT_NAMES} for c in CLASSES}
-    for c in CLASSES:
-        paths = df[df["label"] == c]["path"].tolist()
-        rng.shuffle(paths)
-        i = 0
-        for s in SPLIT_NAMES:
-            n = min(SPLITS[s][c], int(round(frac[c][s] * len(paths))))
-            assign[s][c] = paths[i:i + n]
-            i += n
+for a in SPLIT_NAMES:
+    for b in SPLIT_NAMES:
+        if a < b:
+            assert not (selected[a]["identities"] & selected[b]["identities"])
+print("✅ Identities are fully disjoint across the three splits")
+""")
 
-# copy into RAW_DIR, capping the long side at 512 px
-records = []
-for s in SPLIT_NAMES:
-    for c in CLASSES:
-        dst = os.path.join(RAW_DIR, s, c)
-        os.makedirs(dst, exist_ok=True)
-        for k, src in enumerate(tqdm(assign[s][c], desc=f"copy {s}/{c}")):
-            img = cv2.imread(src)
-            if img is None:
-                continue
-            h, w = img.shape[:2]
-            if max(h, w) > 512:
-                sc = 512 / max(h, w)
-                img = cv2.resize(img, (int(w * sc), int(h * sc)))
-            fn = f"{c}_{s}_{k:06d}.jpg"
-            cv2.imwrite(os.path.join(dst, fn), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            records.append({"filename": fn, "split": s, "label": c})
+md("""### 3.2 Morph generation — Delaunay triangulation + piecewise-affine warp
 
-labels_df = pd.DataFrame(records)
-labels_df.to_csv(os.path.join(RAW_DIR, "labels.csv"), index=False)
-print(labels_df.groupby(["split", "label"]).size())
+The dataset morphs are built with the classic **Beier-Neely / Delaunay landmark
+morphing** used in the face-morphing-attack literature (e.g. Ferrara et al., 2014):
+
+1. **Dense landmarks** — a MediaPipe FaceLandmarker 478-point mesh per face, plus
+   8 fixed frame-boundary points so the whole image (not just the face)
+   participates in the warp.
+2. **Delaunay triangulation** — triangulate the *averaged* landmark set with
+   `cv2.Subdiv2D`, giving a shared triangle mesh indexed identically on both faces.
+3. **Piecewise-affine warp** — every triangle of face A and of face B is
+   affine-warped to the morph shape `(1-α)pA + α pB`.
+4. **Cross-dissolve** — the two warped faces are blended `(1-α)WA + α WB`.
+5. **Face-only composite** — because hair and background have no landmarks, a raw
+   full-frame cross-dissolve would ghost them; instead the blended **face** is
+   pasted (convex-hull mask) onto **one** subject's warped photo, and
+   **Poisson `seamlessClone`** harmonizes the seam. This is how a real morph
+   attack is assembled: the photo passes as one subject, with the blended
+   identity confined to the face.
+
+α = 0.5 gives an equal blend of both identities.
+""")
+code(r'''import cv2, os, urllib.request
+import numpy as np
+import mediapipe as mp
+
+# ---- MediaPipe FaceLandmarker (Tasks API) -> 478 dense landmarks ----
+_LM_MODEL = "/content/face_landmarker.task"
+if not os.path.exists(_LM_MODEL):
+    urllib.request.urlretrieve(
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+        "face_landmarker/float16/1/face_landmarker.task", _LM_MODEL)
+from mediapipe.tasks.python import vision as _mpv
+from mediapipe.tasks import python as _mpp
+_landmarker = _mpv.FaceLandmarker.create_from_options(
+    _mpv.FaceLandmarkerOptions(
+        base_options=_mpp.BaseOptions(model_asset_path=_LM_MODEL),
+        running_mode=_mpv.RunningMode.IMAGE, num_faces=1,
+        min_face_detection_confidence=0.3, min_face_presence_confidence=0.3))
+
+MORPH_WORK = 384   # common canvas so both faces share one coordinate frame
+
+
+def _boundary_points(w, h):
+    # 8 fixed frame points so the whole image participates in the warp
+    return np.array([[0, 0], [w // 2, 0], [w - 1, 0],
+                     [0, h // 2], [w - 1, h // 2],
+                     [0, h - 1], [w // 2, h - 1], [w - 1, h - 1]],
+                    dtype=np.float64)
+
+
+def get_landmarks(img_bgr):
+    # 478 face-mesh points + 8 boundary points; returns (pts, img) or (None, None)
+    rgb = np.ascontiguousarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+    res = _landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+    if not res.face_landmarks:
+        return None, None
+    h, w = img_bgr.shape[:2]
+    fp = np.array([[lm.x * w, lm.y * h] for lm in res.face_landmarks[0]],
+                  dtype=np.float64)
+    pts = np.vstack([fp, _boundary_points(w, h)])
+    return pts, img_bgr
+
+
+def delaunay_triangulation(points, size):
+    # Delaunay via cv2.Subdiv2D; returns triangles as index-triplets into points
+    w, h = size
+    points = points.copy()
+    points[:, 0] = np.clip(points[:, 0], 0, w - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, h - 1)
+    subdiv = cv2.Subdiv2D((0, 0, w, h))
+    for p in points:
+        subdiv.insert((float(p[0]), float(p[1])))
+    point_index = {(round(p[0], 1), round(p[1], 1)): i for i, p in enumerate(points)}
+    triangles = []
+    for t in subdiv.getTriangleList():
+        tri_pts = [(t[0], t[1]), (t[2], t[3]), (t[4], t[5])]
+        if not all(0 <= x < w and 0 <= y < h for x, y in tri_pts):
+            continue
+        idx = []
+        for x, y in tri_pts:
+            key = (round(x, 1), round(y, 1))
+            if key not in point_index:
+                d = np.hypot(points[:, 0] - x, points[:, 1] - y)
+                idx.append(int(np.argmin(d)))
+            else:
+                idx.append(point_index[key])
+        if len(set(idx)) == 3:
+            triangles.append(tuple(idx))
+    return triangles
+
+
+def _warp_triangle(src_img, dst_img, tri_src, tri_dst):
+    # affine-warp one triangular patch from src into dst (border-safe)
+    r_src = cv2.boundingRect(np.float32([tri_src]))
+    r_dst = cv2.boundingRect(np.float32([tri_dst]))
+    tri_src_rect = [(p[0] - r_src[0], p[1] - r_src[1]) for p in tri_src]
+    tri_dst_rect = [(p[0] - r_dst[0], p[1] - r_dst[1]) for p in tri_dst]
+    src_patch = src_img[r_src[1]:r_src[1] + r_src[3], r_src[0]:r_src[0] + r_src[2]]
+    if src_patch.size == 0 or r_dst[2] <= 0 or r_dst[3] <= 0:
+        return
+    mat = cv2.getAffineTransform(np.float32(tri_src_rect), np.float32(tri_dst_rect))
+    warped = cv2.warpAffine(src_patch, mat, (r_dst[2], r_dst[3]), None,
+                            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    mask = np.zeros((r_dst[3], r_dst[2], 3), dtype=np.float32)
+    cv2.fillConvexPoly(mask, np.int32(tri_dst_rect), (1.0, 1.0, 1.0), cv2.LINE_AA)
+    H, W = dst_img.shape[:2]
+    x0, y0, w0, h0 = r_dst
+    x1c, y1c = max(x0, 0), max(y0, 0)
+    x2c, y2c = min(x0 + w0, W), min(y0 + h0, H)
+    if x2c <= x1c or y2c <= y1c:
+        return
+    ox0, oy0 = x1c - x0, y1c - y0
+    ox1, oy1 = ox0 + (x2c - x1c), oy0 + (y2c - y1c)
+    warped_c = warped[oy0:oy1, ox0:ox1]
+    mask_c = mask[oy0:oy1, ox0:ox1]
+    dst_slice = dst_img[y1c:y2c, x1c:x2c]
+    dst_slice[:] = dst_slice * (1 - mask_c) + warped_c * mask_c
+
+
+def morph_images(img1, pts1, img2, pts2, alpha, triangles=None):
+    # full-frame cross-dissolve morph (alpha=0 -> img1, alpha=1 -> img2)
+    h, w = img1.shape[:2]
+    pts1 = np.asarray(pts1, np.float64)
+    pts2 = np.asarray(pts2, np.float64)
+    pts_morph = (1 - alpha) * pts1 + alpha * pts2
+    if triangles is None:
+        triangles = delaunay_triangulation(pts_morph, (w, h))
+    img1f = img1.astype(np.float32)
+    img2f = img2.astype(np.float32)
+    warped1 = np.zeros_like(img1f)
+    warped2 = np.zeros_like(img2f)
+    for (i, j, k) in triangles:
+        tri_m = [tuple(pts_morph[i]), tuple(pts_morph[j]), tuple(pts_morph[k])]
+        _warp_triangle(img1f, warped1,
+                       [tuple(pts1[i]), tuple(pts1[j]), tuple(pts1[k])], tri_m)
+        _warp_triangle(img2f, warped2,
+                       [tuple(pts2[i]), tuple(pts2[j]), tuple(pts2[k])], tri_m)
+    morphed = (1 - alpha) * warped1 + alpha * warped2
+    return np.clip(morphed, 0, 255).astype(np.uint8), triangles
+
+
+def _warp_to_shape(img, pts_src, pts_dst, triangles):
+    imgf = img.astype(np.float32)
+    out = np.zeros_like(imgf)
+    for (i, j, k) in triangles:
+        _warp_triangle(imgf, out,
+                       [tuple(pts_src[i]), tuple(pts_src[j]), tuple(pts_src[k])],
+                       [tuple(pts_dst[i]), tuple(pts_dst[j]), tuple(pts_dst[k])])
+    return out
+
+
+def render_morph(up_a, pts_a, up_b, pts_b, alpha, frame_from, triangles=None):
+    # frame_from None -> raw full-frame cross-dissolve;
+    # frame_from A/B -> blend face only, take hair+background from that subject
+    if frame_from is None:
+        return morph_images(up_a, pts_a, up_b, pts_b, alpha, triangles=triangles)
+    h, w = up_a.shape[:2]
+    pts_m = (1 - alpha) * pts_a + alpha * pts_b
+    if triangles is None:
+        triangles = delaunay_triangulation(pts_m, (w, h))
+    warped_a = _warp_to_shape(up_a, pts_a, pts_m, triangles)
+    warped_b = _warp_to_shape(up_b, pts_b, pts_m, triangles)
+    blend = (1 - alpha) * warped_a + alpha * warped_b
+    frame = warped_a if frame_from == "A" else warped_b
+    n_face = len(pts_m) - 8
+    hull = cv2.convexHull(pts_m[:n_face].astype(np.int32))
+    mask = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(mask, hull, 255)
+    blend8 = np.clip(blend, 0, 255).astype(np.uint8)
+    frame8 = np.clip(frame, 0, 255).astype(np.uint8)
+    x, y, bw, bh = cv2.boundingRect(hull)
+    try:
+        out = cv2.seamlessClone(blend8, frame8, mask,
+                                (x + bw // 2, y + bh // 2), cv2.NORMAL_CLONE)
+    except cv2.error:
+        soft = cv2.GaussianBlur(cv2.erode(mask, np.ones((15, 15), np.uint8)),
+                                (31, 31), 0)
+        m3 = (soft.astype(np.float32) / 255.0)[..., None]
+        out = np.clip(blend * m3 + frame * (1 - m3), 0, 255).astype(np.uint8)
+    return out, triangles
+
+
+def morph_faces(img1, img2, alpha=MORPH_ALPHA):
+    # Dataset wrapper: put both faces on a shared MORPH_WORK canvas, landmark,
+    # morph, composite face-only (hair/bg from a random subject), resize to output.
+    a = cv2.resize(img1, (MORPH_WORK, MORPH_WORK))
+    b = cv2.resize(img2, (MORPH_WORK, MORPH_WORK))
+    pts_a, up_a = get_landmarks(a)
+    pts_b, up_b = get_landmarks(b)
+    if pts_a is None or pts_b is None:
+        return None
+    out, _ = render_morph(up_a, pts_a, up_b, pts_b, alpha,
+                          frame_from=random.choice(["A", "B"]))
+    return cv2.resize(out, MORPH_SIZE)
+
+
+def sharpness(img_bgr):
+    return cv2.Laplacian(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY),
+                         cv2.CV_64F).var()
+
+# Quick smoke test: show the Delaunay morph next to its two source faces
+a, b = selected["train"]["images"][:2]
+src1 = cv2.imread(img2path[a])
+src2 = cv2.imread(img2path[b])
+test_m = morph_faces(src1, src2)
+print("Delaunay morph works - output shape:",
+      None if test_m is None else test_m.shape)
+if test_m is not None:
+    fig, ax = plt.subplots(1, 3, figsize=(11, 4))
+    for a_, im, t in zip(ax, [src1, src2, test_m],
+                         ["source 1", "source 2", "Delaunay morph"]):
+        a_.imshow(cv2.cvtColor(cv2.resize(im, MORPH_SIZE), cv2.COLOR_BGR2RGB))
+        a_.set_title(t); a_.axis("off")
+    plt.tight_layout(); plt.show()
 ''')
 
-md("""### 3.1 Visual review of the loaded dataset
+md(r"""> #### (Optional) GAN-based morphs — the hardest attacks
+>
+> The classical pipeline above produces seamless landmark morphs. The very hardest
+> attacks are **GAN latent-space morphs**: encode both faces into a StyleGAN latent
+> space (e.g. with an e4e/pSp encoder), interpolate the latent codes, and generate
+> a brand-new synthetic face. These have no warping seams at all.
+>
+> They are **not enabled by default** because they need heavy pretrained models
+> (StyleGAN2 + encoder, several GB) and are slow/fragile to run for 21,000 images
+> inside a single Colab session. To use them, generate the GAN morphs offline,
+> drop them into `RAW_DIR/<split>/morph/`, and skip Part 3.3. Mixing ~10–20% GAN
+> morphs with the classical ones is a good way to make the detector robust to both
+> attack families without a full StyleGAN run.
 """)
-code(r'''fig, axes = plt.subplots(2, 6, figsize=(16, 5.5))
+
+md("""### 3.3 Generate the morphed images (with automatic review and Drive checkpoints)
+
+Pick two images of **different people from the same split** → blend → automatic
+review (clear face + sufficient sharpness) → save and record.
+
+**Checkpointing / resume**: progress is saved to Drive every `CHECKPOINT_EVERY`
+morphs (zip of the split's morph folder + a records CSV). If the session
+disconnects, running this cell again — even on a new VM — restores from Drive and
+continues from where it stopped.
+""")
+code(r"""LABELS_CSV = os.path.join(RAW_DIR, "labels.csv")
+
+
+def _sync_split_to_drive(split, out_dir):
+    # Checkpoint: zip this split's morphs + its records CSV to Drive
+    if not CHECKPOINT_TO_DRIVE:
+        return
+    shutil.make_archive(os.path.join(CKPT_DIR, f"morph_{split}"), "zip", out_dir)
+    csvp = os.path.join(RAW_DIR, f"morph_records_{split}.csv")
+    if os.path.exists(csvp):
+        shutil.copy(csvp, CKPT_DIR)
+
+
+# Restore from Drive checkpoints when starting on a fresh VM
+if CHECKPOINT_TO_DRIVE:
+    for split in SPLIT_NAMES:
+        out_dir = os.path.join(RAW_DIR, split, "morph")
+        os.makedirs(out_dir, exist_ok=True)
+        zpath = os.path.join(CKPT_DIR, f"morph_{split}.zip")
+        if os.path.exists(zpath) and not glob.glob(os.path.join(out_dir, "*.jpg")):
+            print(f"📥 Restoring {split} morphs from Drive checkpoint ...")
+            shutil.unpack_archive(zpath, out_dir)
+        csvd = os.path.join(CKPT_DIR, f"morph_records_{split}.csv")
+        csvl = os.path.join(RAW_DIR, f"morph_records_{split}.csv")
+        if os.path.exists(csvd) and not os.path.exists(csvl):
+            shutil.copy(csvd, csvl)
+    lcz = os.path.join(CKPT_DIR, "labels.csv")
+    if os.path.exists(lcz) and not os.path.exists(LABELS_CSV):
+        shutil.copy(lcz, LABELS_CSV)
+
+# Full shortcut: if the entire dataset is already complete, skip generation
+RESUME = False
+if os.path.exists(LABELS_CSV):
+    prev = pd.read_csv(LABELS_CSV)
+    counts_ok = all(
+        (prev[(prev.split == s) & (prev.label == l)].shape[0] >= SPLITS[s][l])
+        for s in SPLITS for l in ["real", "morph"])
+    files_ok = all(
+        len(glob.glob(os.path.join(RAW_DIR, s, l, "*.jpg"))) >= SPLITS[s][l]
+        for s in SPLITS for l in ["real", "morph"])
+    if counts_ok and files_ok:
+        RESUME = True
+        print("⏭️ Dataset already fully generated — skipping (auto-resume)")
+
+records, rejected = [], 0
+
+for split, tgt in ([] if RESUME else list(SPLITS.items())):
+    pool = selected[split]["images"]
+    out_dir = os.path.join(RAW_DIR, split, "morph")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Partial resume inside the split: continue from where we stopped
+    ckpt_csv = os.path.join(RAW_DIR, f"morph_records_{split}.csv")
+    prev_recs = (pd.read_csv(ckpt_csv).to_dict("records")
+                 if os.path.exists(ckpt_csv) else [])
+    n_files = len(glob.glob(os.path.join(out_dir, "morph_*.jpg")))
+    done = min(len(prev_recs), n_files, tgt["morph"])
+    split_records = list(prev_recs[:done])
+    if done:
+        print(f"📥 {split}: resuming from {done}/{tgt['morph']} morphs")
+
+    attempts = 0
+    max_attempts = (tgt["morph"] - done) * 30 + 1000   # infinite-loop guard
+    pbar = tqdm(total=tgt["morph"], initial=done, desc=f"morphs {split}")
+    while done < tgt["morph"] and attempts < max_attempts:
+        attempts += 1
+        a, b = random.sample(pool, 2)
+        if img2id[a] == img2id[b]:          # must be two different people
+            continue
+        i1 = cv2.imread(img2path[a])
+        i2 = cv2.imread(img2path[b])
+        if i1 is None or i2 is None:
+            continue
+        m = morph_faces(i1, i2)
+        # --- automatic review (reject unrealistic results) ---
+        if m is None or get_landmarks(m)[0] is None or sharpness(m) < MIN_SHARPNESS:
+            rejected += 1
+            continue
+        fn = f"morph_{split}_{done:05d}.jpg"
+        cv2.imwrite(os.path.join(out_dir, fn), m,
+                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+        split_records.append({"filename": fn, "split": split, "label": "morph",
+                              "src1": a, "src2": b,
+                              "id1": img2id[a], "id2": img2id[b]})
+        done += 1
+        pbar.update(1)
+        # Periodic Drive checkpoint so a disconnect never loses progress
+        if done % CHECKPOINT_EVERY == 0:
+            pd.DataFrame(split_records).to_csv(ckpt_csv, index=False)
+            _sync_split_to_drive(split, out_dir)
+            pbar.set_postfix_str("💾 checkpoint saved")
+    pbar.close()
+    pd.DataFrame(split_records).to_csv(ckpt_csv, index=False)
+    _sync_split_to_drive(split, out_dir)
+    records.extend(split_records)
+
+if not RESUME:
+    n_morph = sum(1 for r in records if r["label"] == "morph")
+    print(f"✅ Generated {n_morph} morphs — {rejected} rejected by automatic review")
+""")
+
+md("""### 3.4 Copy real images + labels + visual review and verification
+""")
+code(r"""for split, tgt in ([] if RESUME else list(SPLITS.items())):
+    out_dir = os.path.join(RAW_DIR, split, "real")
+    os.makedirs(out_dir, exist_ok=True)
+    for fn in tqdm(selected[split]["images"], desc=f"copy real {split}"):
+        img = cv2.imread(img2path[fn])
+        if img is None:
+            continue
+        out_name = f"real_{fn}"
+        cv2.imwrite(os.path.join(out_dir, out_name),
+                    cv2.resize(img, MORPH_SIZE),
+                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+        records.append({"filename": out_name, "split": split, "label": "real",
+                        "src1": fn, "src2": None,
+                        "id1": img2id[fn], "id2": None})
+
+if RESUME:
+    labels_df = pd.read_csv(LABELS_CSV)          # resume from saved labels
+else:
+    labels_df = pd.DataFrame(records)
+    labels_df.to_csv(LABELS_CSV, index=False)
+    if CHECKPOINT_TO_DRIVE:
+        shutil.copy(LABELS_CSV, os.path.join(CKPT_DIR, "labels.csv"))
+print(labels_df.groupby(["split", "label"]).size())
+
+# Verification: counts + identity disjointness (including morph sources)
+def ids_of(s):
+    sub = labels_df[labels_df.split == s]
+    return set(sub.id1.dropna()) | set(sub.id2.dropna())
+
+for i, a in enumerate(SPLIT_NAMES):
+    for b in SPLIT_NAMES[i + 1:]:
+        assert not (ids_of(a) & ids_of(b)), f"Identity overlap between {a} and {b}!"
+print("✅ No identity is shared between splits (morph sources included)")
+
+# Visual review: one row of real images, one row of morphs
+fig, axes = plt.subplots(2, 6, figsize=(16, 5.5))
 for row, lab in enumerate(["real", "morph"]):
-    sub = labels_df[labels_df.label == lab]
-    sample = sub.sample(min(6, len(sub)), random_state=SEED)
+    sample = labels_df[labels_df.label == lab].sample(6, random_state=SEED)
     for i, (_, r) in enumerate(sample.iterrows()):
         p = os.path.join(RAW_DIR, r.split, r.label, r.filename)
-        img = cv2.imread(p)
-        if img is not None:
-            axes[row, i].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        axes[row, i].imshow(cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB))
         axes[row, i].set_title(f"{lab} ({r.split})", fontsize=9)
         axes[row, i].axis("off")
 plt.tight_layout()
 plt.show()
-print("Dataset ready. Real vs morph samples above — confirm the morph row really "
-      "shows morphed faces before training.")
-''')
+""")
 
 # ================================================================ PART 4
 md(r"""## Part 4 — Preprocessing: 528×528 + CLAHE

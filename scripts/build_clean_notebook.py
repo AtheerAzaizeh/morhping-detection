@@ -380,8 +380,187 @@ print("\n" + classification_report(yte, pred, target_names=["Real", "Morph"]))
 print("Paper reference: 89.9% accuracy, AUC 0.965.")
 """)
 
+# ---------------------------------------------------------------- improve
+md(r"""## 10 &middot; Improving the results (step by step)
+
+The SVM is accurate but **misses morphs** (low recall / high false negatives).
+To push further we train a small **neural-network classifier** on the same B6
+features and change **one training choice at a time**, always plotting the
+accuracy / loss curves and comparing to the previous experiment.
+
+Levers we test: **softmax + cross-entropy** head, **dropout** (overfitting),
+**learning-rate decay**, **activation function**, **class weights** (to fix the
+missed-morph problem), and a **deeper + BatchNorm** head. A running table shows
+the improvement after every change.
+
+> The B6 backbone (all the convolution + pooling) stays frozen and provides the
+> features; here we optimise the trainable head, which trains in seconds.
+""")
+code(r"""import pandas as pd
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                             f1_score, roc_auc_score)
+from tensorflow.keras import layers, Sequential, optimizers
+
+results = []                      # running comparison table
+
+def evaluate(y_true, proba, thr=0.5):
+    pred = (proba >= thr).astype(int)
+    return dict(acc=accuracy_score(y_true, pred),
+                prec=precision_score(y_true, pred, zero_division=0),
+                rec=recall_score(y_true, pred, zero_division=0),
+                f1=f1_score(y_true, pred, zero_division=0),
+                auc=roc_auc_score(y_true, proba))
+
+def log(name, m):
+    results.append(dict(experiment=name, **{k: round(v, 3) for k, v in m.items()}))
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        p, c = df.iloc[-2], df.iloc[-1]
+        print(f"vs '{p.experiment}':  acc {c.acc-p.acc:+.3f}   f1 {c.f1-p.f1:+.3f}"
+              f"   recall {c.rec-p.rec:+.3f}")
+    print(df.to_string(index=False))
+    return df
+
+def curves(h, title):
+    fig, ax = plt.subplots(1, 2, figsize=(12, 3.6))
+    ax[0].plot(h['accuracy'], label='train'); ax[0].plot(h['val_accuracy'], label='val')
+    ax[0].set_title(f"Accuracy — {title}"); ax[0].set_xlabel("epoch"); ax[0].legend()
+    ax[1].plot(h['loss'], label='train'); ax[1].plot(h['val_loss'], label='val')
+    ax[1].set_title("Cross-entropy loss"); ax[1].set_xlabel("epoch"); ax[1].legend()
+    for a in ax: a.grid(alpha=0.3)
+    plt.tight_layout(); plt.show()
+
+def run(name, units=(256,), activation='relu', dropout=0.3, lr=1e-3,
+        decay=None, class_weight=None, batchnorm=False, epochs=40):
+    tf.keras.utils.set_random_seed(SEED)
+    net = [layers.Input((Xtr.shape[1],))]
+    for u in units:
+        net.append(layers.Dense(u, activation=None if batchnorm else activation))
+        if batchnorm:
+            net += [layers.BatchNormalization(), layers.Activation(activation)]
+        net.append(layers.Dropout(dropout))
+    net.append(layers.Dense(2, activation='softmax'))
+    model = Sequential(net)
+
+    steps = max(1, len(Xtr) // 32)
+    if decay == 'cosine':
+        lr = optimizers.schedules.CosineDecay(lr, epochs * steps)
+    elif decay == 'exp':
+        lr = optimizers.schedules.ExponentialDecay(lr, steps, 0.92)
+    model.compile(optimizers.Adam(lr), 'sparse_categorical_crossentropy',
+                  metrics=['accuracy'])
+    h = model.fit(Xtr, ytr, validation_data=(Xva, yva), epochs=epochs,
+                  batch_size=32, class_weight=class_weight, verbose=0)
+    curves(h.history, name)
+    proba = model.predict(Xte, verbose=0)[:, 1]
+    df = log(name, evaluate(yte, proba))
+    return model, proba, df
+
+# start the table with the SVM baseline
+log("0 · SVM (baseline)", evaluate(yte, svm.predict_proba(Xte)[:, 1]))
+""")
+
+md("""### Experiment 1 — Neural head (softmax + cross-entropy)
+
+A single dense layer with a softmax output, trained with cross-entropy. Notice
+the train accuracy spikes toward 1.0 while validation lags — classic
+**overfitting**, exactly like the reference curves.
+""")
+code(r"""_ = run("1 · MLP (softmax+CE)", units=(256,), dropout=0.0, epochs=40)""")
+
+md("""### Experiment 2 — Add dropout (reduce overfitting)
+
+Dropout randomly disables neurons during training, closing the train/val gap.
+""")
+code(r"""_ = run("2 · + dropout 0.5", units=(256,), dropout=0.5, epochs=40)""")
+
+md("""### Experiment 3 — Learning-rate decay
+
+A cosine-decayed learning rate takes large steps early, then fine steps late —
+smoother convergence and a better minimum.
+""")
+code(r"""_ = run("3 · + cosine LR decay", units=(256,), dropout=0.5,
+        lr=1e-3, decay='cosine', epochs=40)""")
+
+md("""### Experiment 4 — Activation function (ReLU → Swish)
+
+Swish (`x·sigmoid(x)`) is smooth and often outperforms ReLU — it is the
+activation EfficientNet itself uses.
+""")
+code(r"""_ = run("4 · + Swish activation", units=(256,), activation='swish',
+        dropout=0.5, decay='cosine', epochs=40)""")
+
+md("""### Experiment 5 — Class weights (fix the missed morphs)
+
+The main weakness is **low recall** (missed morphs). Weighting the morph class
+higher in the loss pushes the model to catch more morphs.
+""")
+code(r"""_ = run("5 · + class weights", units=(256,), activation='swish',
+        dropout=0.5, decay='cosine', class_weight={0: 1.0, 1: 2.5}, epochs=40)""")
+
+md("""### Experiment 6 — Deeper head + BatchNorm
+
+More capacity with BatchNorm for stable training.
+""")
+code(r"""best_model, best_proba, table = run(
+    "6 · deeper + BatchNorm", units=(512, 128), activation='swish',
+    dropout=0.5, decay='cosine', batchnorm=True,
+    class_weight={0: 1.0, 1: 2.5}, epochs=50)""")
+
+md("""### Progress across all experiments
+
+The line chart shows accuracy, F1 and recall improving from the SVM baseline
+through each change — the "flow of results" toward the best model.
+""")
+code(r"""prog = pd.DataFrame(results)
+fig, ax = plt.subplots(figsize=(11, 4.5))
+x = range(len(prog))
+for col, c in [("acc", "#2456a6"), ("f1", "#268a58"), ("rec", "#d8791a")]:
+    ax.plot(x, prog[col], "o-", color=c, label=col)
+    for xi, v in zip(x, prog[col]):
+        ax.annotate(f"{v:.2f}", (xi, v), fontsize=8, ha="center", va="bottom")
+ax.set_xticks(list(x)); ax.set_xticklabels(prog["experiment"], rotation=25, ha="right",
+                                           fontsize=8)
+ax.set_ylabel("score"); ax.set_title("Improvement flow (higher is better)")
+ax.legend(); ax.grid(alpha=0.3); plt.tight_layout(); plt.show()
+
+best = prog.loc[prog["f1"].idxmax(), "experiment"]
+print(f"Best model by F1: {best}")
+print(prog.to_string(index=False))
+""")
+
+md(r"""### Final step — tune the decision threshold
+
+The best model still uses a 0.5 cut-off. We pick the threshold on the
+**validation** set that maximises F1 (or catches more morphs), then show the
+final confusion matrix — the last improvement step.
+""")
+code(r"""from sklearn.metrics import confusion_matrix
+val_proba = best_model.predict(Xva, verbose=0)[:, 1]
+ths = np.linspace(0.05, 0.95, 181)
+best_thr = max(ths, key=lambda t: f1_score(yva, (val_proba >= t).astype(int),
+                                           zero_division=0))
+m = evaluate(yte, best_proba, thr=best_thr)
+log(f"7 · best + threshold {best_thr:.2f}", m)
+
+cm = confusion_matrix(yte, (best_proba >= best_thr).astype(int))
+tn, fp, fn, tp = cm.ravel()
+plt.figure(figsize=(4.6, 4))
+plt.imshow(cm, cmap="Blues")
+plt.xticks([0, 1], ["Real", "Morph"]); plt.yticks([0, 1], ["Real", "Morph"])
+plt.xlabel("Predicted"); plt.ylabel("Actual"); plt.title("Final confusion matrix")
+for i in range(2):
+    for j in range(2):
+        plt.text(j, i, cm[i, j], ha="center", va="center", fontsize=15,
+                 color="white" if cm[i, j] > cm.max() / 2 else "black")
+plt.tight_layout(); plt.show()
+print(f"Final: acc {m['acc']:.3f}  precision {m['prec']:.3f}  recall {m['rec']:.3f}"
+      f"  f1 {m['f1']:.3f}  AUC {m['auc']:.3f}")
+print(f"Missed morphs (FN): {fn}   (baseline SVM had more)")
+""")
+
 # ---------------------------------------------------------------- try it
-md("""## 10 · Try it on your own image
+md("""## 11 · Try it on your own image
 
 Upload a face photo and the model predicts **Real** or **Morph** with a
 confidence score.

@@ -96,6 +96,15 @@ code(r"""SWAP_KW = ("swap", "fake", "altered", "morph", "manip", "spoof", "synth
            "forged", "deepfake")
 REAL_KW = ("original", "real", "orig", "genuine", "bonafide", "authentic", "pristine")
 
+# The dataset's OWN root folder is named "face-swap-images" (contains "swap"),
+# which would mislabel every image. Strip the common root before matching.
+_rels = [os.path.relpath(p, DATA) for p in all_imgs]
+ROOT = os.path.commonpath(_rels) if len(_rels) > 1 else ""
+
+def _rel(p):
+    r = os.path.relpath(p, DATA)
+    return os.path.relpath(r, ROOT) if ROOT and ROOT not in (".", "") else r
+
 def split_of(parts):
     for p in parts:
         if p in ("train", "training"):                 return "train"
@@ -103,22 +112,24 @@ def split_of(parts):
         if p in ("test", "testing", "eval"):           return "test"
     return None
 
-def label_of(low):
-    if any(k in low for k in SWAP_KW): return 1     # face-swapped / morph
-    if any(k in low for k in REAL_KW): return 0     # original / real
-    return None
+def classify(path):
+    r = _rel(path).lower()
+    s = split_of(r.split(os.sep))
+    if any(k in r for k in SWAP_KW):   y = 1     # face-swapped / morph
+    elif any(k in r for k in REAL_KW): y = 0     # original / real
+    else:                              y = None
+    return s, y
 
 splits = {"train": [], "val": [], "test": []}
 skipped = 0
 for p in all_imgs:
-    parts = os.path.relpath(p, DATA).lower().split(os.sep)
-    s, y = split_of(parts), label_of(os.path.relpath(p, DATA).lower())
+    s, y = classify(p)
     if s is None or y is None:
         skipped += 1
         continue
     splits[s].append((p, y))
 
-# if the dataset has no val split, carve one out of train (image-level)
+# carve a val split from train if the dataset has none
 if not splits["val"] and splits["train"]:
     random.shuffle(splits["train"])
     n = max(1, int(0.15 * len(splits["train"])))
@@ -134,10 +145,16 @@ if DEMO:
         random.shuffle(splits[s])
 
 for s, v in splits.items():
-    r = sum(1 for _, y in v if y == 0); m = len(v) - r
-    print(f"{s:5s}: {len(v):5d}  (original {r}, swapped {m})")
-print("skipped (unclassified):", skipped)
-assert all(splits[s] for s in splits), "A split is empty — check the folder keywords above."
+    r = sum(1 for _, y in v if y == 0)
+    print(f"{s:5s}: {len(v):5d}  (original {r}, swapped {len(v) - r})")
+print("skipped:", skipped, "| stripped root:", repr(ROOT))
+for y, nm in [(0, "original"), (1, "swapped")]:
+    ex = [_rel(p) for p in all_imgs if classify(p)[1] == y][:2]
+    print(f"  sample {nm} path:", ex)
+
+assert all(splits[s] for s in splits), "A split is empty — check the sample paths above."
+assert any(y == 0 for v in splits.values() for _, y in v), \
+    "No ORIGINAL images detected — adjust REAL_KW to match the folder names printed above."
 items = splits["train"] + splits["val"] + splits["test"]
 """)
 

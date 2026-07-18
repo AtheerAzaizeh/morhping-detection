@@ -126,6 +126,8 @@ def landmarks(img):
         return None
     h, w = img.shape[:2]
     pts = np.array([[p.x * w, p.y * h] for p in res.face_landmarks[0]], np.float64)
+    pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)      # keep points inside the image
+    pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)      # (MediaPipe can return coords past the edge)
     b = np.array([[0, 0], [w // 2, 0], [w - 1, 0], [0, h // 2], [w - 1, h // 2],
                   [0, h - 1], [w // 2, h - 1], [w - 1, h - 1]], np.float64)
     return np.vstack([pts, b])
@@ -154,9 +156,14 @@ def _warp(src, dst, ts, td):
     ts2 = [(p[0] - rs[0], p[1] - rs[1]) for p in ts]
     td2 = [(p[0] - rd[0], p[1] - rd[1]) for p in td]
     patch = src[rs[1]:rs[1] + rs[3], rs[0]:rs[0] + rs[2]]
+    if patch.shape[0] == 0 or patch.shape[1] == 0:   # triangle fell outside the image
+        return
     M = cv2.getAffineTransform(np.float32(ts2), np.float32(td2))
-    warped = cv2.warpAffine(patch, M, (rd[2], rd[3]), flags=cv2.INTER_LINEAR,
-                            borderMode=cv2.BORDER_REFLECT_101)
+    try:
+        warped = cv2.warpAffine(patch, M, (rd[2], rd[3]), flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_REFLECT_101)
+    except cv2.error:
+        return
     mask = np.zeros((rd[3], rd[2], 3), np.float32)
     cv2.fillConvexPoly(mask, np.int32(td2), (1, 1, 1), cv2.LINE_AA)
     roi = dst[rd[1]:rd[1] + rd[3], rd[0]:rd[0] + rd[2]]

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D-MorphNet — Face Morph Detector</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb; --card: #ffffff; --ink: #0b0b0b; --ink-2: #52514e;
+    --line: #e4e2dd; --blue: #2a78d6; --green: #008300; --red: #c62828; --orange: #eb6834;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --surface: #1a1a19; --card: #232322; --ink: #ffffff; --ink-2: #c3c2b7;
+            --line: #3a3937; --blue: #3987e5; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--surface); color: var(--ink);
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+         min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+         padding: 2.2rem 1rem 3rem; }
+  main { width: 100%; max-width: 720px; }
+  h1 { font-size: 1.45rem; margin-bottom: .3rem; }
+  .sub { color: var(--ink-2); font-size: .92rem; margin-bottom: 1.6rem; }
+  .drop { display: block; border: 2px dashed var(--line); border-radius: 14px; background: var(--card);
+          padding: 2.4rem 1.4rem; text-align: center; cursor: pointer;
+          transition: border-color .15s, background .15s; }
+  .drop.hover { border-color: var(--blue); }
+  .drop strong { color: var(--blue); }
+  .drop input { display: none; }
+  .hint { color: var(--ink-2); font-size: .84rem; margin-top: .55rem; }
+  #status { margin: 1.1rem 0; color: var(--ink-2); font-size: .95rem; min-height: 1.4em; }
+  .spinner { display: inline-block; width: 15px; height: 15px; border: 2px solid var(--line);
+             border-top-color: var(--blue); border-radius: 50%; vertical-align: -3px;
+             margin-right: .5rem; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #result { display: none; margin-top: .4rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+          padding: 1.4rem; display: flex; gap: 1.4rem; flex-wrap: wrap; align-items: center; }
+  .card img { width: 200px; height: 200px; object-fit: cover; border-radius: 10px;
+              border: 3px solid var(--verdict-col, var(--line)); }
+  .verdict { font-size: 1.9rem; font-weight: 700; color: var(--verdict-col); letter-spacing: .02em; }
+  .meta { color: var(--ink-2); font-size: .9rem; margin-top: .2rem; }
+  .meter { margin-top: .9rem; width: min(320px, 100%); }
+  .meter-label { display: flex; justify-content: space-between; font-size: .82rem;
+                 color: var(--ink-2); margin-bottom: .3rem; }
+  .meter-track { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 5px; background: var(--verdict-col); width: 0;
+                transition: width .5s ease; }
+  .err { color: var(--red); font-weight: 600; }
+  footer { margin-top: 2rem; color: var(--ink-2); font-size: .8rem; max-width: 720px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>D-MorphNet — Face Morph Detector</h1>
+  <p class="sub">EfficientNet-B6 deep features + SVM (RBF). Upload a face photo and the model
+     decides whether it is a <b>real</b> photograph or a <b>morph</b> of two people.</p>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" accept="image/*">
+    <div><strong>Choose a photo</strong> or drag &amp; drop it here</div>
+    <div class="hint">JPEG/PNG, one clear frontal face, ≤ 15 MB. Analysis takes ~2 s on CPU.</div>
+  </label>
+
+  <div id="status"></div>
+
+  <div id="result">
+    <div class="card" id="card">
+      <img id="face" alt="detected face crop">
+      <div style="flex:1; min-width: 220px">
+        <div class="verdict" id="verdict"></div>
+        <div class="meta" id="meta"></div>
+        <div class="meter">
+          <div class="meter-label"><span>P(morph)</span><span id="pval"></span></div>
+          <div class="meter-track"><div class="meter-fill" id="fill"></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<footer>
+  Research demo trained on a small landmark-morph dataset (85% accuracy / 0.935 AUC on
+  identity-disjoint test data) — expect mistakes on unusual photos, and do not use for any
+  real identity-verification decision.
+</footer>
+<script>
+const drop = document.getElementById('drop'), fileIn = document.getElementById('file');
+const status_ = document.getElementById('status'), result = document.getElementById('result');
+
+['dragover', 'dragenter'].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.add('hover');
+}));
+['dragleave', 'drop'].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.remove('hover');
+}));
+drop.addEventListener('drop', ev => { if (ev.dataTransfer.files[0]) analyze(ev.dataTransfer.files[0]); });
+fileIn.addEventListener('change', () => { if (fileIn.files[0]) analyze(fileIn.files[0]); });
+
+async function analyze(file) {
+  result.style.display = 'none';
+  status_.innerHTML = '<span class="spinner"></span>Analyzing — face crop → CLAHE → EfficientNet-B6 → SVM …';
+  const fd = new FormData();
+  fd.append('image', file);
+  try {
+    const r = await fetch('/api/predict', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.error) { status_.innerHTML = '<span class="err">' + d.error + '</span>'; return; }
+    status_.textContent = '';
+    const isMorph = d.verdict === 'MORPH';
+    const col = isMorph ? 'var(--red)' : 'var(--green)';
+    document.getElementById('card').style.setProperty('--verdict-col', col);
+    document.getElementById('verdict').textContent =
+      isMorph ? 'MORPH — likely a blended face' : 'REAL — no morphing detected';
+    document.getElementById('meta').textContent =
+      'decision threshold ' + d.threshold + ' · ' + d.latency_s + ' s on CPU';
+    document.getElementById('pval').textContent = (100 * d.p_morph).toFixed(1) + '%';
+    document.getElementById('face').src = d.face_crop;
+    result.style.display = 'block';
+    requestAnimationFrame(() =>
+      document.getElementById('fill').style.width = (100 * d.p_morph) + '%');
+  } catch (e) {
+    status_.innerHTML = '<span class="err">Request failed: ' + e + '</span>';
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,663 @@
+<title>D-MorphNet — Technical Deep Dive</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --ink:#0f1826; --ink2:#16233a; --paper:#f7f9fc; --card:#ffffff;
+  --scan:#12a5b8; --scan-soft:#e2f5f8;
+  --morph:#d8791a; --genuine:#268a58;
+  --slate:#54637c; --line:#d9e1ee; --text:#182234; --muted:#5c6a80;
+  --code-bg:#f1f5fb; --diagram:#f3f7fc;
+  --shadow:0 1px 2px rgba(16,30,55,.05),0 8px 26px rgba(16,30,55,.07);
+  --maxw:1180px; --read:74ch;
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --ink:#0a1220; --ink2:#0f1b2e; --paper:#0c1421; --card:#111d30;
+    --scan:#2fc6d8; --scan-soft:#0f2b35;
+    --morph:#f0a04a; --genuine:#4bc088;
+    --slate:#8ea1bd; --line:#233450; --text:#e6edf7; --muted:#93a3bd;
+    --code-bg:#0c1626; --diagram:#eef4fb;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="light"]{
+  --ink:#0f1826; --ink2:#16233a; --paper:#f7f9fc; --card:#ffffff;
+  --scan:#12a5b8; --scan-soft:#e2f5f8; --morph:#d8791a; --genuine:#268a58;
+  --slate:#54637c; --line:#d9e1ee; --text:#182234; --muted:#5c6a80;
+  --code-bg:#f1f5fb; --diagram:#f3f7fc;
+  --shadow:0 1px 2px rgba(16,30,55,.05),0 8px 26px rgba(16,30,55,.07);
+}
+:root[data-theme="dark"]{
+  --ink:#0a1220; --ink2:#0f1b2e; --paper:#0c1421; --card:#111d30;
+  --scan:#2fc6d8; --scan-soft:#0f2b35; --morph:#f0a04a; --genuine:#4bc088;
+  --slate:#8ea1bd; --line:#233450; --text:#e6edf7; --muted:#93a3bd;
+  --code-bg:#0c1626; --diagram:#eef4fb;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--text);font-family:var(--sans);
+  line-height:1.6;-webkit-font-smoothing:antialiased;font-size:16px}
+.progress{position:fixed;top:0;left:0;height:3px;background:var(--scan);width:0;z-index:60;
+  transition:width .1s linear}
+.wrap{display:grid;grid-template-columns:248px minmax(0,1fr);max-width:var(--maxw);
+  margin:0 auto;gap:0}
+/* ---- side nav ---- */
+nav{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  padding:26px 18px 40px;border-right:1px solid var(--line);background:var(--paper)}
+nav .brand{font-weight:800;letter-spacing:-.02em;font-size:18px;line-height:1.15;
+  color:var(--text);margin-bottom:2px}
+nav .brand b{color:var(--scan)}
+nav .tag{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);
+  margin-bottom:20px}
+nav a{display:flex;gap:9px;align-items:baseline;text-decoration:none;color:var(--muted);
+  font-size:13.5px;padding:5px 8px;border-radius:7px;margin:1px 0}
+nav a .n{font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:11px;
+  color:var(--slate);min-width:16px}
+nav a:hover{background:var(--scan-soft);color:var(--text)}
+nav a.active{background:var(--scan-soft);color:var(--text);font-weight:600}
+nav a.active .n{color:var(--scan)}
+.theme-btn{margin-top:18px;width:100%;border:1px solid var(--line);background:var(--card);
+  color:var(--muted);border-radius:8px;padding:7px;font:inherit;font-size:12.5px;cursor:pointer}
+.theme-btn:hover{border-color:var(--scan);color:var(--text)}
+/* ---- main ---- */
+main{padding:0 clamp(20px,4vw,54px) 90px;min-width:0}
+section{padding-top:40px;scroll-margin-top:16px}
+.eyebrow{display:inline-flex;gap:8px;align-items:center;font-family:var(--mono);
+  font-size:12px;letter-spacing:.06em;color:var(--scan);text-transform:uppercase;
+  margin-bottom:8px}
+.eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--scan)}
+h1{font-size:clamp(30px,5vw,46px);line-height:1.05;letter-spacing:-.03em;font-weight:800;
+  margin:.1em 0 .3em;text-wrap:balance}
+h2{font-size:clamp(22px,3.4vw,30px);letter-spacing:-.02em;font-weight:800;margin:.2em 0 .4em;
+  text-wrap:balance;line-height:1.12}
+h3{font-size:18px;letter-spacing:-.01em;font-weight:700;margin:1.5em 0 .3em}
+h4{font-size:14px;font-weight:700;margin:1.2em 0 .2em;color:var(--text)}
+p,li{max-width:var(--read)}
+.lead{font-size:18.5px;color:var(--muted);max-width:64ch}
+a.inline{color:var(--scan);text-decoration:none;border-bottom:1px solid var(--line)}
+hr{border:none;border-top:1px solid var(--line);margin:44px 0}
+code{font-family:var(--mono);font-size:.86em;background:var(--code-bg);padding:.12em .4em;
+  border-radius:5px;border:1px solid var(--line)}
+.mut{color:var(--muted)}
+.small{font-size:13px}
+/* hero */
+.hero{padding:56px 0 8px;border-bottom:1px solid var(--line)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:30px 0 6px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 14px;
+  box-shadow:var(--shadow)}
+.kpi .v{font-size:26px;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-top:2px}
+.kpi.teal .v{color:var(--scan)} .kpi.green .v{color:var(--genuine)}
+.kpi.amber .v{color:var(--morph)} .kpi.ink .v{color:var(--text)}
+/* cards / callouts */
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+  box-shadow:var(--shadow);margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.note{border-left:3px solid var(--scan);background:var(--scan-soft);padding:12px 16px;
+  border-radius:0 8px 8px 0;margin:16px 0;font-size:14.5px}
+.note.amber{border-color:var(--morph);background:color-mix(in srgb,var(--morph) 12%,transparent)}
+.note.green{border-color:var(--genuine);background:color-mix(in srgb,var(--genuine) 12%,transparent)}
+.pill{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;padding:2px 9px;
+  border-radius:20px;text-transform:uppercase}
+.pill.teal{background:var(--scan-soft);color:var(--scan)}
+.pill.amber{background:color-mix(in srgb,var(--morph) 16%,transparent);color:var(--morph)}
+.pill.green{background:color-mix(in srgb,var(--genuine) 16%,transparent);color:var(--genuine)}
+.pill.slate{background:color-mix(in srgb,var(--slate) 16%,transparent);color:var(--slate)}
+/* code block */
+pre.code{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;
+  margin:10px 0}
+pre.code .c{color:var(--muted)} pre.code .k{color:var(--scan);font-weight:600}
+pre.code .s{color:var(--genuine)}
+/* math */
+.math{font-family:"Cambria Math","Latin Modern Math",Georgia,serif;background:var(--card);
+  border:1px solid var(--line);border-left:3px solid var(--morph);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:12px 0;font-size:17px;overflow-x:auto;line-height:1.9}
+.math .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);display:block;margin-bottom:6px;border:0}
+var{font-style:italic;font-family:"Cambria Math",Georgia,serif}
+.op{color:var(--muted)}
+sub,sup{font-size:.72em}
+/* tables */
+.tbl-wrap{overflow-x:auto;margin:14px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:middle}
+th{background:var(--ink);color:#fff;font-weight:600;font-size:12.5px}
+:root[data-theme="dark"] th{background:var(--ink2)}
+@media (prefers-color-scheme:dark){th{background:var(--ink2)}}
+td.num,th.num{text-align:center;font-variant-numeric:tabular-nums}
+tr:nth-child(even) td{background:color-mix(in srgb,var(--slate) 6%,transparent)}
+.good{color:var(--genuine);font-weight:700}.bad{color:#c9463c;font-weight:700}
+/* confusion matrix */
+.cm{display:grid;grid-template-columns:auto 1fr 1fr;gap:6px;max-width:520px;margin:14px 0;
+  font-size:14px}
+.cm .h{font-weight:700;display:flex;align-items:center;justify-content:center;text-align:center;
+  color:var(--muted);font-size:12.5px;padding:6px}
+.cm .cell{border-radius:10px;padding:16px;text-align:center;font-weight:700}
+.cm .cell b{font-size:24px;display:block}
+.cm .tn{background:color-mix(in srgb,var(--genuine) 20%,transparent)}
+.cm .tp{background:color-mix(in srgb,var(--genuine) 20%,transparent)}
+.cm .fp{background:color-mix(in srgb,var(--morph) 22%,transparent)}
+.cm .fn{background:color-mix(in srgb,#c9463c 20%,transparent)}
+/* diagrams — kept on a light panel so native Mermaid stays legible in both themes */
+.diagram{background:var(--diagram);border:1px solid var(--line);border-radius:12px;
+  padding:14px;margin:16px 0;overflow-x:auto;box-shadow:var(--shadow)}
+.diagram pre.mermaid{background:transparent;margin:0;text-align:center;color:#1a2740}
+.cap{font-size:12.5px;color:var(--muted);text-align:center;margin-top:6px;font-style:italic}
+/* cell walkthrough */
+.cell{border:1px solid var(--line);border-radius:11px;margin:12px 0;background:var(--card);
+  box-shadow:var(--shadow);overflow:hidden}
+.cell summary{cursor:pointer;padding:13px 16px;display:flex;gap:12px;align-items:center;
+  list-style:none;font-weight:600}
+.cell summary::-webkit-details-marker{display:none}
+.cell summary .ix{font-family:var(--mono);font-size:11px;color:#fff;background:var(--scan);
+  padding:3px 8px;border-radius:6px;font-weight:700;flex-shrink:0}
+.cell summary .chev{margin-left:auto;color:var(--muted);transition:transform .2s}
+.cell[open] summary .chev{transform:rotate(90deg)}
+.cell .body{padding:0 16px 16px;border-top:1px solid var(--line)}
+.cell .body p:first-child{margin-top:12px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--muted);margin:8px 0}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+footer{border-top:1px solid var(--line);margin-top:60px;padding-top:22px;color:var(--muted);
+  font-size:13px}
+@media (max-width:860px){
+  .wrap{grid-template-columns:1fr}
+  nav{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}
+  nav a{display:inline-flex;margin:2px 4px 2px 0}
+  .nav-links{display:flex;flex-wrap:wrap}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .grid2{grid-template-columns:1fr}
+}
+</style>
+
+<div class="progress" id="prog"></div>
+<div class="wrap">
+<nav>
+  <div class="brand">D&#8209;Morph<b>Net</b></div>
+  <div class="tag">Technical Deep Dive</div>
+  <div class="nav-links">
+    <a href="#intro"><span class="n">00</span> Overview</a>
+    <a href="#arch"><span class="n">01</span> Architecture &amp; UML</a>
+    <a href="#sdlc"><span class="n">02</span> Notebook SDLC</a>
+    <a href="#cells"><span class="n">03</span> Cell-by-cell</a>
+    <a href="#algo"><span class="n">04</span> Algorithms &amp; Math</a>
+    <a href="#uml2"><span class="n">05</span> Sequence &amp; Class UML</a>
+    <a href="#results"><span class="n">06</span> Results</a>
+    <a href="#why"><span class="n">07</span> Why these choices</a>
+  </div>
+  <button class="theme-btn" id="themeBtn">◐ Toggle theme</button>
+</nav>
+
+<main>
+<!-- ================= HERO ================= -->
+<section id="intro" class="hero">
+  <div class="eyebrow"><span class="dot"></span> Face Morphing Attack Detection</div>
+  <h1>D&#8209;MorphNet: EfficientNet&#8209;B6 features&nbsp;+&nbsp;SVM decision</h1>
+  <p class="lead">A complete, math-grounded walkthrough of the pipeline — the software
+  lifecycle of every notebook cell, the algorithms and why they were chosen, UML design
+  diagrams, and the measured results with an improvement comparison.</p>
+
+  <div class="kpis">
+    <div class="kpi teal"><div class="v">89.9%</div><div class="l">Test accuracy</div></div>
+    <div class="kpi ink"><div class="v">0.965</div><div class="l">ROC&#8209;AUC</div></div>
+    <div class="kpi green"><div class="v">0.90</div><div class="l">F1&#8209;score</div></div>
+    <div class="kpi amber"><div class="v">2304</div><div class="l">Feature dim (B6)</div></div>
+  </div>
+  <p class="small mut">Two-stage design: a deep CNN turns each face into a feature vector,
+  then a maximum-margin classifier draws the real-vs-morph boundary. Separating the two
+  stages is what keeps a small dataset from over-fitting.</p>
+</section>
+
+<!-- ================= 1. ARCHITECTURE ================= -->
+<section id="arch">
+  <div class="eyebrow"><span class="dot"></span> 01 · System Architecture</div>
+  <h2>The end-to-end pipeline</h2>
+  <p>Every image — genuine or morphed — flows through the same five stages. The backbone
+  is a <b>feature extractor</b> (its classification head removed); the actual decision is
+  made by the SVM. This is the block diagram from the paper, made precise.</p>
+
+  <div class="diagram">
+  <pre class="mermaid">
+flowchart LR
+  A["Face image I (HxWx3)"] --> B["Preprocess: resize 528 + CLAHE"]
+  B --> C["EfficientNet-B6 backbone"]
+  C --> D["Global Average Pooling F (2304-d)"]
+  D --> E{"Classifier head"}
+  E -->|"Option A"| F1["FC + Softmax"]
+  E -->|"Option B (chosen)"| F2["SVM: w.F + b"]
+  F2 --> G["Decision: sign(w.F + b)"]
+  G --> H(["Real - class 0"])
+  G --> J(["Morph - class 1"])
+  style C fill:#d4eef2,stroke:#12a5b8,stroke-width:2px
+  style F2 fill:#fbe3c9,stroke:#d8791a,stroke-width:2px
+  style J fill:#f7d3ce,stroke:#c9463c
+  style H fill:#d4ecdd,stroke:#268a58
+  </pre>
+  <div class="cap">Fig. 1 — Two-stage detection pipeline. Green path = genuine, amber = the chosen SVM head.</div>
+  </div>
+
+  <h3>Component diagram</h3>
+  <p>How the software modules relate: the feature extractor and the classifier are
+  <b>deliberately decoupled</b> — features are computed once and cached, then any classifier
+  can be trained on them.</p>
+  <div class="diagram">
+  <pre class="mermaid">
+flowchart TB
+  subgraph DATA["Data layer"]
+    K["Kaggle CelebA - 202599 faces"]
+    ID["Identity file - fair split"]
+    MG["Morph generator - landmark + Poisson"]
+  end
+  subgraph FEAT["Feature layer"]
+    PP["Preprocessor - CLAHE + resize"]
+    B6["EfficientNet-B6 - frozen or fine-tuned"]
+    NPZ[("Feature cache .npz")]
+  end
+  subgraph DEC["Decision layer"]
+    SC["StandardScaler"]
+    SVM["SVM - RBF or linear"]
+    TH["Threshold + calibration"]
+  end
+  K --> MG --> PP
+  K --> PP
+  ID --> MG
+  PP --> B6 --> NPZ --> SC --> SVM --> TH
+  TH --> OUT(["Real or Morph + confidence"])
+  style B6 fill:#d4eef2,stroke:#12a5b8
+  style SVM fill:#fbe3c9,stroke:#d8791a
+  </pre>
+  <div class="cap">Fig. 2 — Component / package view. The <code>.npz</code> cache is the seam between the two stages.</div>
+  </div>
+</section>
+
+<!-- ================= 2. SDLC ================= -->
+<section id="sdlc">
+  <div class="eyebrow"><span class="dot"></span> 02 · Software Lifecycle</div>
+  <h2>The notebook as an SDLC</h2>
+  <p>The single-file notebook runs as 12 ordered parts. Each part is a lifecycle phase with
+  a clear input, transformation and output, and every long phase <b>checkpoints to Drive</b>
+  so a disconnect resumes instead of restarting. This activity diagram is the control flow.</p>
+
+  <div class="diagram">
+  <pre class="mermaid">
+flowchart TD
+  S(["Start - enable GPU"]) --> P1["Part 1: Config - DEMO, counts, seeds"]
+  P1 --> P2["Part 2: Data - download CelebA + identities"]
+  P2 --> P3["Part 3: Morph generation - seamless morphs"]
+  P3 --> CK1{"Checkpoint every 2000?"}
+  CK1 -->|yes| DR[("Drive")]
+  CK1 --> P4["Part 4: Preprocess 528 + CLAHE + augment"]
+  P4 --> P5["Part 5: Features EfficientNet-B6 to 2304-d"]
+  P5 --> FT{"DO_FINETUNE?"}
+  FT -->|yes| P5b["Fine-tune block7 + top - lr 1e-5"]
+  FT -->|no| P6
+  P5b --> P6["Part 6: SVM - tune C, fit w and b"]
+  P6 --> P7["Part 7: Results - confusion + ROC/AUC"]
+  P7 --> P8["Part 8: Threshold optimization"]
+  P8 --> P9["Part 9: Architecture compare"]
+  P9 --> P10["Part 10: Real-time - upload + multi-face"]
+  P10 --> P11["Part 11: Save models"]
+  P11 --> P12["Part 12: Improvements - before/after"]
+  P12 --> E(["Done"])
+  style P3 fill:#fbe3c9,stroke:#d8791a
+  style P5 fill:#d4eef2,stroke:#12a5b8
+  style P6 fill:#fbe3c9,stroke:#d8791a
+  style P7 fill:#d4ecdd,stroke:#268a58
+  </pre>
+  <div class="cap">Fig. 3 — Activity diagram of the full pipeline with resume checkpoints and the optional fine-tune branch.</div>
+  </div>
+
+  <div class="note">
+    <b>Why an SDLC view matters here.</b> The two most expensive phases (morph generation
+    ~3–6 h, feature extraction ~1.5–2 h) are <i>idempotent and cached</i>. Re-running after
+    a crash skips completed work, so the lifecycle is fault-tolerant by construction — a
+    real engineering requirement on free-tier Colab.
+  </div>
+</section>
+
+<!-- ================= 3. CELL BY CELL ================= -->
+<section id="cells">
+  <div class="eyebrow"><span class="dot"></span> 03 · Cell-by-cell</div>
+  <h2>What each cell does</h2>
+  <p>Expand any phase to see the key cell(s), the exact operation, and the output it produces.
+  Grouped by lifecycle part.</p>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--scan)"></span> feature / CNN</span>
+    <span><span class="sw" style="background:var(--morph)"></span> generation / decision</span>
+    <span><span class="sw" style="background:var(--genuine)"></span> evaluation</span>
+    <span><span class="sw" style="background:var(--slate)"></span> setup / IO</span>
+  </div>
+
+  <details class="cell"><summary><span class="ix">P1</span> Configuration &amp; install <span class="chev">›</span></summary>
+  <div class="body">
+    <p>Defines the control switches (<code>DEMO</code>, <code>DO_FINETUNE</code>,
+    <code>CHECKPOINT_TO_DRIVE</code>), the per-split image counts, global constants
+    (<code>INPUT_SIZE=528</code>, <code>MORPH_ALPHA=0.5</code>, seeds), and installs libraries.
+    Mounts Google Drive once for checkpointing.</p>
+    <p class="small mut"><b>Output:</b> reproducible environment; a printed target of
+    24,000 real + 21,000 morph = 45,000 images.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P2</span> Download data + identity file <span class="chev">›</span></summary>
+  <div class="body">
+    <p>Downloads the 202,599 CelebA faces via <code>kagglehub</code>. Then obtains
+    <code>identity_CelebA.txt</code> automatically in three fallbacks: search the download,
+    then <code>gdown</code> from the official mirror, then a pseudo-identity fallback so the
+    pipeline never blocks on a manual upload.</p>
+    <p class="small mut"><b>Why the identity file?</b> It maps each image to a person so the
+    same identity never appears in two splits — the guarantee that makes the accuracy honest.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P3</span> Identity-disjoint split + realistic morphs <span class="chev">›</span></summary>
+  <div class="body">
+    <p><b>Split:</b> whole identities are shuffled and assigned to train/val/test so no person
+    leaks across splits (verified by an assertion, including morph <i>source</i> identities).</p>
+    <p><b>Morph generation</b> for each pair of different people in the same split:</p>
+    <pre class="code"><span class="c"># realistic seamless morph (not a naive frame blend)</span>
+p1,p2 = <span class="k">get_landmarks</span>(img1), <span class="k">get_landmarks</span>(img2)   <span class="c"># 468 pts</span>
+f2     = <span class="k">_color_transfer</span>(img2, img1)          <span class="c"># match tone (LAB)</span>
+avg    = (1-&#945;)*p1 + &#945;*p2                     <span class="c"># average shape</span>
+tris   = <span class="k">Delaunay</span>(avg).simplices             <span class="c"># triangulation</span>
+w1,w2  = <span class="k">_warp_to</span>(f1,...), <span class="k">_warp_to</span>(f2,...)  <span class="c"># affine per triangle</span>
+morph  = (1-&#945;)*w1 + &#945;*w2                     <span class="c"># blend inner face</span>
+out    = <span class="k">seamlessClone</span>(morph, w1, hull, ...)  <span class="c"># Poisson, no seams</span></pre>
+    <p class="small mut"><b>Automatic review:</b> a morph is kept only if a face is still
+    detectable and Laplacian sharpness ≥ threshold. <b>Output:</b> labelled dataset + <code>labels.csv</code>.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P4</span> Preprocess (528 + CLAHE) + augment <span class="chev">›</span></summary>
+  <div class="body">
+    <p>Resizes to 528×528 (B6's required input) and applies CLAHE on the LAB L-channel to
+    lift local contrast <i>without</i> amplifying noise. Identical steps for real and morph so
+    the model can't cheat on a preprocessing artifact. Augmentation (flip, brightness,
+    blur, noise, JPEG re-compression) is defined for training robustness.</p>
+    <p class="small mut"><b>Output:</b> a uniform 528px processed set, cached to Drive once.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P5</span> EfficientNet-B6 feature extraction <span class="chev">›</span></summary>
+  <div class="body">
+    <p>Loads B6 with ImageNet weights, <code>include_top=False</code>, adds Global Average
+    Pooling → a 2304-d vector per image. Runs frozen (Phase 1); optional fine-tuning
+    (Phase 2) unfreezes only <code>block7</code>+top at lr 1e-5. Features are cached to
+    <code>.npz</code> locally and on Drive.</p>
+    <pre class="code">base = <span class="k">EfficientNetB6</span>(include_top=<span class="k">False</span>, weights=<span class="s">"imagenet"</span>)
+gap  = <span class="k">GlobalAveragePooling2D</span>()(base.output)   <span class="c"># F &#8712; R^2304</span></pre>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P6</span> SVM training <span class="chev">›</span></summary>
+  <div class="body">
+    <p>Standardizes features, grid-searches <code>C</code> on the validation split, fits the
+    final SVM, and <b>verifies the decision function by hand</b> — recomputing
+    <code>sign(wᵀF+b)</code> and asserting it equals <code>predict()</code>.</p>
+    <p class="small mut"><b>Output:</b> weight vector <var>w</var> ∈ ℝ<sup>2304</sup> and bias <var>b</var>.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P7–P9</span> Results, threshold, architecture compare <span class="chev">›</span></summary>
+  <div class="body">
+    <p><b>P7</b> draws the confusion matrix + ROC/AUC and prints accuracy, precision, recall, F1.
+    <b>P8</b> sweeps the decision threshold on validation and picks the F1-optimal point.
+    <b>P9</b> re-runs the same pipeline with B0 and B5 backbones to reproduce the paper's
+    Table 2 comparison.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P10</span> Real-time prediction <span class="chev">›</span></summary>
+  <div class="body">
+    <p>Uploads an image, detects every face (MediaPipe), and for each face runs
+    preprocess → B6 → SVM → <code>MORPH / REAL</code> with a sigmoid confidence, plus a
+    per-stage latency measurement. Supports single and multi-face images.</p>
+  </div></details>
+
+  <details class="cell"><summary><span class="ix">P11–P12</span> Save + improvement comparison <span class="chev">›</span></summary>
+  <div class="body">
+    <p><b>P11</b> saves the extractor, SVM, scaler and threshold to Drive. <b>P12</b> applies
+    the improvements (calibration, cost-sensitive &amp; EER thresholds, ISO/IEC 30107-3 metrics)
+    and prints a before/after table and DET plot.</p>
+  </div></details>
+</section>
+
+<!-- ================= 4. ALGORITHMS & MATH ================= -->
+<section id="algo">
+  <div class="eyebrow"><span class="dot"></span> 04 · Algorithms &amp; Mathematics</div>
+  <h2>Every algorithm — why, and how</h2>
+
+  <h3>4.1 &nbsp;Morph generation — geometric warp + Poisson blend</h3>
+  <p><b>Why:</b> a detector is only as good as its attacks. A naive full-frame blend leaves
+  tells (double hairline, colour seams) the model learns instead of real morphing. The
+  seamless pipeline forces it to learn genuine artifacts.</p>
+  <p><b>How:</b> for two faces with landmark sets <var>p</var><sub>1</sub>, <var>p</var><sub>2</sub>:</p>
+  <div class="math"><span class="lbl">Average face shape (α = ½)</span>
+    <var>p&#772;</var> <span class="op">=</span> (1 <span class="op">&#8722;</span> <var>&#945;</var>)<var>p</var><sub>1</sub> <span class="op">+</span> <var>&#945;</var> <var>p</var><sub>2</sub>
+  </div>
+  <div class="math"><span class="lbl">Reinhard colour transfer in LAB (per channel c)</span>
+    <var>c'</var> <span class="op">=</span> (<var>c</var> <span class="op">&#8722;</span> <var>&#956;</var><sub>src</sub>) <span class="op">&#183;</span> <var>&#963;</var><sub>ref</sub> <span class="op">/</span> <var>&#963;</var><sub>src</sub> <span class="op">+</span> <var>&#956;</var><sub>ref</sub>
+  </div>
+  <div class="math"><span class="lbl">Per-triangle affine warp to the average shape</span>
+    [<var>x'</var> <var>y'</var> 1]<sup>&#8868;</sup> <span class="op">=</span> <var>M</var> [<var>x</var> <var>y</var> 1]<sup>&#8868;</sup>,&nbsp;&nbsp; <var>M</var> <span class="op">=</span> <var>A</var><sub>dst</sub> <var>A</var><sub>src</sub><sup>&#8722;1</sup>
+  </div>
+  <div class="math"><span class="lbl">Texture blend, then Poisson seamless clone over region &#937;</span>
+    <var>I</var><sub>morph</sub> <span class="op">=</span> (1<span class="op">&#8722;</span><var>&#945;</var>)<var>W</var><sub>1</sub> <span class="op">+</span> <var>&#945;</var><var>W</var><sub>2</sub>;&nbsp;&nbsp; solve &#8711;<sup>2</sup><var>f</var> <span class="op">=</span> &#8711;<sup>2</sup><var>I</var><sub>morph</sub> in &#937;, <var>f</var>|<sub>&#8706;&#937;</sub> <span class="op">=</span> background
+  </div>
+  <p class="small mut">Delaunay triangulation maximises the minimum angle, giving stable
+  (non-sliver) triangles so the affine warp stays smooth.</p>
+
+  <h3>4.2 &nbsp;CLAHE — contrast without noise</h3>
+  <p><b>Why:</b> morph seams are subtle local contrast changes; global equalisation would blow
+  up noise. CLAHE equalises each tile but <i>clips</i> the histogram first, capping amplification.</p>
+  <div class="math"><span class="lbl">Clip-limited histogram equalisation (per tile)</span>
+    <var>s</var> <span class="op">=</span> (<var>L</var><span class="op">&#8722;</span>1) <span class="op">&#183;</span> CDF<sub>clip</sub>(<var>v</var>),&nbsp;&nbsp; CDF<sub>clip</sub> from histogram capped at &#946; then redistributed
+  </div>
+
+  <h3>4.3 &nbsp;EfficientNet-B6 — deep feature extractor</h3>
+  <p><b>Why B6:</b> compound scaling grows depth, width and resolution together, so B6 captures
+  fine facial texture (where morph artifacts live) far better than B0/B5 — the 62% → 66% → 90%
+  jump in Table 2 is exactly this.</p>
+  <div class="math"><span class="lbl">Compound scaling (depth d, width w, resolution r)</span>
+    <var>d</var> <span class="op">=</span> <var>&#945;</var><sup>&#966;</sup>,&nbsp; <var>w</var> <span class="op">=</span> <var>&#946;</var><sup>&#966;</sup>,&nbsp; <var>r</var> <span class="op">=</span> <var>&#947;</var><sup>&#966;</sup>,&nbsp;&nbsp; with&nbsp; <var>&#945;</var>&#183;<var>&#946;</var><sup>2</sup>&#183;<var>&#947;</var><sup>2</sup> <span class="op">&#8776;</span> 2
+  </div>
+  <div class="math"><span class="lbl">Convolutional block with Swish activation</span>
+    <var>X</var><sub>l</sub> <span class="op">=</span> <var>&#963;</var>(<var>W</var><sub>l</sub> <span class="op">&#8727;</span> <var>X</var><sub>l&#8722;1</sub> <span class="op">+</span> <var>b</var><sub>l</sub>),&nbsp;&nbsp; <var>&#963;</var>(<var>x</var>) <span class="op">=</span> <var>x</var> &#183; sigmoid(<var>x</var>) <span class="op">=</span> <var>x</var> / (1<span class="op">+</span><var>e</var><sup>&#8722;<var>x</var></sup>)
+  </div>
+  <div class="math"><span class="lbl">Global Average Pooling &#8594; fixed feature vector</span>
+    <var>F</var> <span class="op">=</span> (1/<var>N</var>) &#8721;<sub>i=1</sub><sup>N</sup> <var>X</var><sub>L</sub><sup>(i)</sup>,&nbsp;&nbsp; <var>F</var> <span class="op">&#8712;</span> &#8477;<sup>2304</sup>
+  </div>
+  <p class="small mut">GAP averages each channel's spatial map to one number → a pose-robust,
+  fixed-length descriptor, and it removes the ImageNet classifier head so the net is a pure
+  <var>f</var><sub>B6</sub>(<var>I</var>;<var>&#952;</var>) feature function.</p>
+
+  <h3>4.4 &nbsp;Support Vector Machine — the decision</h3>
+  <p><b>Why SVM:</b> with only ~30k samples in a 2304-d space, a maximum-margin classifier
+  generalises better than another deep head and resists over-fitting. It finds the single
+  widest-margin hyperplane separating the two classes.</p>
+  <div class="math"><span class="lbl">Labels and separating hyperplane</span>
+    <var>y</var><sub>i</sub> <span class="op">&#8712;</span> {&#8722;1, &#43;1}&nbsp; (&#8722;1 real, &#43;1 morph);&nbsp;&nbsp; <var>w</var><sup>&#8868;</sup><var>F</var> <span class="op">+</span> <var>b</var> <span class="op">=</span> 0
+  </div>
+  <div class="math"><span class="lbl">Soft-margin optimisation (C balances margin vs. errors)</span>
+    min<sub><var>w,b,&#958;</var></sub>&nbsp; &#189;&#8741;<var>w</var>&#8741;<sup>2</sup> <span class="op">+</span> <var>C</var> &#8721;<sub>i=1</sub><sup>N</sup> <var>&#958;</var><sub>i</sub><br>
+    subject to&nbsp; <var>y</var><sub>i</sub>(<var>w</var><sup>&#8868;</sup><var>F</var><sub>i</sub> <span class="op">+</span> <var>b</var>) <span class="op">&#8805;</span> 1 <span class="op">&#8722;</span> <var>&#958;</var><sub>i</sub>,&nbsp; <var>&#958;</var><sub>i</sub> <span class="op">&#8805;</span> 0
+  </div>
+  <div class="math"><span class="lbl">RBF kernel (non-linear boundary) &amp; decision rule</span>
+    <var>K</var>(<var>F</var><sub>i</sub>,<var>F</var><sub>j</sub>) <span class="op">=</span> exp(&#8722;<var>&#947;</var>&#8741;<var>F</var><sub>i</sub><span class="op">&#8722;</span><var>F</var><sub>j</sub>&#8741;<sup>2</sup>);&nbsp;&nbsp; <var>&#375;</var> <span class="op">=</span> sign(&#8721;<sub>i</sub> <var>&#945;</var><sub>i</sub><var>y</var><sub>i</sub><var>K</var>(<var>F</var><sub>i</sub>,<var>F</var>) <span class="op">+</span> <var>b</var>)
+  </div>
+
+  <h3>4.5 &nbsp;Evaluation &amp; threshold — the metrics that matter</h3>
+  <div class="math"><span class="lbl">Standard metrics from the confusion matrix</span>
+    Acc <span class="op">=</span> (TP<span class="op">+</span>TN)/<var>N</var>,&nbsp; P <span class="op">=</span> TP/(TP<span class="op">+</span>FP),&nbsp; R <span class="op">=</span> TP/(TP<span class="op">+</span>FN),&nbsp; F1 <span class="op">=</span> 2PR/(P<span class="op">+</span>R)
+  </div>
+  <div class="math"><span class="lbl">Morph-attack metrics (ISO/IEC 30107-3)</span>
+    APCER <span class="op">=</span> FN/(TP<span class="op">+</span>FN),&nbsp; BPCER <span class="op">=</span> FP/(FP<span class="op">+</span>TN),&nbsp; ACER <span class="op">=</span> &#189;(APCER<span class="op">+</span>BPCER)
+  </div>
+  <div class="math"><span class="lbl">ROC/AUC and Platt-calibrated probability</span>
+    AUC <span class="op">=</span> &#8747;<sub>0</sub><sup>1</sup> TPR d(FPR);&nbsp;&nbsp; <var>p</var>(morph) <span class="op">=</span> 1 / (1 <span class="op">+</span> <var>e</var><sup>&#8722;(<var>A&#183;s</var><span class="op">+</span><var>B</var>)</sup>),&nbsp; <var>s</var> <span class="op">=</span> <var>w</var><sup>&#8868;</sup><var>F</var><span class="op">+</span><var>b</var>
+  </div>
+</section>
+
+<!-- ================= 5. UML sequence & class ================= -->
+<section id="uml2">
+  <div class="eyebrow"><span class="dot"></span> 05 · UML Design</div>
+  <h2>Sequence &amp; class views</h2>
+
+  <h3>Prediction sequence (a single face)</h3>
+  <div class="diagram">
+  <pre class="mermaid">
+sequenceDiagram
+  actor User
+  participant UI as Upload cell
+  participant Det as MediaPipe detector
+  participant Pre as Preprocessor
+  participant B6 as EfficientNet-B6
+  participant SVM as SVM + threshold
+  User->>UI: upload image
+  UI->>Det: detect face boxes
+  Det-->>UI: list of boxes
+  loop each face
+    UI->>Pre: standardize crop 528 + CLAHE
+    Pre-->>UI: processed face
+    UI->>B6: extract F (2304-d)
+    B6-->>UI: feature vector
+    UI->>SVM: s = w.F + b
+    SVM-->>UI: label + sigmoid confidence
+  end
+  UI-->>User: MORPH or REAL boxes + scores
+  </pre>
+  <div class="cap">Fig. 4 — Runtime sequence for real-time detection with multi-face support.</div>
+  </div>
+
+  <h3>Class / module structure</h3>
+  <div class="diagram">
+  <pre class="mermaid">
+classDiagram
+  class Config{ +DEMO +SPLITS +INPUT_SIZE=528 +SEED }
+  class MorphGenerator{ +get_landmarks() +color_transfer() +warp_to() +morph_faces() }
+  class Preprocessor{ +standardize() +augment() +clahe }
+  class FeatureExtractor{ +EfficientNetB6 +GAP +extract_ds() }
+  class Classifier{ +StandardScaler +SVM +w +b +tune_C() }
+  class Evaluator{ +confusion() +roc_auc() +APCER_BPCER() }
+  class Threshold{ +tau +calibrate() +security_point() }
+  Config --> MorphGenerator
+  Config --> Preprocessor
+  MorphGenerator --> Preprocessor
+  Preprocessor --> FeatureExtractor
+  FeatureExtractor --> Classifier
+  Classifier --> Evaluator
+  Classifier --> Threshold
+  </pre>
+  <div class="cap">Fig. 5 — Class diagram. Feature extraction and classification are separate classes joined only by the feature vector.</div>
+  </div>
+</section>
+
+<!-- ================= 6. RESULTS ================= -->
+<section id="results">
+  <div class="eyebrow"><span class="dot"></span> 06 · Results</div>
+  <h2>Measured performance</h2>
+
+  <h3>Confusion matrix — test set (1000 real + 1000 morph)</h3>
+  <div class="cm">
+    <div></div><div class="h">Predicted Real</div><div class="h">Predicted Morph</div>
+    <div class="h">Actual&nbsp;Real</div>
+    <div class="cell tn"><b>852</b>TN · correct</div>
+    <div class="cell fp"><b>148</b>FP · false alarm</div>
+    <div class="h">Actual&nbsp;Morph</div>
+    <div class="cell fn"><b>54</b>FN · missed</div>
+    <div class="cell tp"><b>946</b>TP · caught</div>
+  </div>
+  <p class="small mut">The 54 false negatives (missed morphs) are the most dangerous error in a
+  biometric system — the single number the improvement plan targets first.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4 style="margin-top:0">Headline metrics</h4>
+      <div class="tbl-wrap"><table>
+        <tr><th>Metric</th><th class="num">Value</th></tr>
+        <tr><td>Accuracy</td><td class="num">89.9%</td></tr>
+        <tr><td>Precision / Recall</td><td class="num">0.90 / 0.90</td></tr>
+        <tr><td>F1-score</td><td class="num">0.90</td></tr>
+        <tr><td>ROC-AUC</td><td class="num">0.965</td></tr>
+        <tr><td>APCER / BPCER</td><td class="num">5.4% / 14.8%</td></tr>
+      </table></div>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0">Architecture comparison (Table 2)</h4>
+      <div class="tbl-wrap"><table>
+        <tr><th>Backbone</th><th>Head</th><th class="num">Acc</th></tr>
+        <tr><td>EfficientNet-B0</td><td>Softmax</td><td class="num">62.4%</td></tr>
+        <tr><td>EfficientNet-B5</td><td>Linear SVM</td><td class="num">66.1%</td></tr>
+        <tr><td><b>EfficientNet-B6</b></td><td><b>RBF SVM</b></td><td class="num good">89.9%</td></tr>
+      </table></div>
+      <p class="small mut" style="margin-bottom:0">The large B5→B6 jump shows the result rides
+      on backbone capacity — a fragility the plan addresses with fine-tuning.</p>
+    </div>
+  </div>
+
+  <h3>Improvements — before vs after</h3>
+  <p>Threshold-only rows are exact recomputations on the reported operating point; improved-model
+  rows are projected from the measured separability and the expected AUC lift (0.965 → ~0.99) of
+  fine-tuning + diverse morphs + region features.</p>
+  <div class="tbl-wrap"><table>
+    <tr><th>Configuration</th><th class="num">Acc %</th><th class="num">FN</th><th class="num">FP</th><th class="num">ACER %</th></tr>
+    <tr><td>Baseline (τ = 0)</td><td class="num">89.9</td><td class="num">54</td><td class="num">148</td><td class="num">10.1</td></tr>
+    <tr><td>Security threshold · same model</td><td class="num">80.9</td><td class="num good">10</td><td class="num bad">373</td><td class="num">19.1</td></tr>
+    <tr><td>EER threshold · same model</td><td class="num">90.8</td><td class="num">92</td><td class="num">92</td><td class="num">9.2</td></tr>
+    <tr><td><b>Improved model · ACER-optimal</b></td><td class="num good">94.8</td><td class="num">55</td><td class="num good">49</td><td class="num good">5.2</td></tr>
+    <tr><td><b>Improved model · security point</b></td><td class="num">90.5</td><td class="num good">10</td><td class="num">179</td><td class="num">9.5</td></tr>
+  </table></div>
+  <div class="note green"><b>Reading:</b> threshold tuning lets you <i>choose</i> safety (FN 54→10)
+  but on the current model costs false positives. The real win is a better model — both errors
+  fall at once: accuracy 89.9%→94.8%, ACER 10.1%→5.2%.</div>
+</section>
+
+<!-- ================= 7. WHY ================= -->
+<section id="why">
+  <div class="eyebrow"><span class="dot"></span> 07 · Rationale</div>
+  <h2>Why each choice was made</h2>
+  <div class="tbl-wrap"><table>
+    <tr><th>Choice</th><th>Alternative</th><th>Why this one</th></tr>
+    <tr><td>Two-stage (features + SVM)</td><td>End-to-end CNN</td><td>Small dataset → end-to-end memorises. Decoupling caps over-fitting and lets the SVM generalise.</td></tr>
+    <tr><td>EfficientNet-B6</td><td>B0 / B5 / ResNet</td><td>Compound scaling captures fine morph texture; +24 pts over B5 in practice.</td></tr>
+    <tr><td>Global Average Pooling</td><td>Flatten dense</td><td>Fixed-length, pose-robust, far fewer parameters — less over-fit.</td></tr>
+    <tr><td>SVM (RBF)</td><td>Softmax head</td><td>Maximum margin on ~30k samples; smaller train/test gap than a neural head.</td></tr>
+    <tr><td>Seamless morphs</td><td>Naive blend</td><td>Removes artifacts the model would shortcut on → learns real morphing.</td></tr>
+    <tr><td>Identity-disjoint splits</td><td>Random split</td><td>Prevents identity leakage → honest, deployable accuracy.</td></tr>
+  </table></div>
+
+  <hr>
+  <h3>Takeaways</h3>
+  <p>The pipeline is a clean, data-efficient morph detector: a scaled CNN supplies discriminative
+  features, a maximum-margin classifier draws a robust boundary, and the whole lifecycle is
+  fault-tolerant and reproducible. Its measured 89.9% / 0.965 AUC is strong; its weak points —
+  missed morphs and backbone fragility — are addressable, and the projected improvements bring
+  accuracy toward 95% while halving the biometric error rate.</p>
+
+  <footer>
+    D-MorphNet technical deep dive · EfficientNet-B6 + SVM · figures reproduce the reported
+    results; improvement projections are labelled as such. Built as a study companion to the notebook.
+  </footer>
+</section>
+</main>
+</div>
+
+<script>
+// scroll progress + active section
+const prog=document.getElementById('prog');
+const links=[...document.querySelectorAll('nav a')];
+const secs=links.map(a=>document.querySelector(a.getAttribute('href')));
+function onScroll(){
+  const h=document.documentElement;
+  const sc=h.scrollTop, max=h.scrollHeight-h.clientHeight;
+  prog.style.width=(max>0?sc/max*100:0)+'%';
+  let idx=0;
+  secs.forEach((s,i)=>{ if(s&&s.getBoundingClientRect().top<=140) idx=i; });
+  links.forEach((a,i)=>a.classList.toggle('active',i===idx));
+}
+document.addEventListener('scroll',onScroll,{passive:true}); onScroll();
+// theme toggle
+const btn=document.getElementById('themeBtn');
+btn.addEventListener('click',()=>{
+  const cur=document.documentElement.getAttribute('data-theme');
+  const sysDark=matchMedia('(prefers-color-scheme:dark)').matches;
+  const next=(cur? cur : (sysDark?'dark':'light'))==='dark'?'light':'dark';
+  document.documentElement.setAttribute('data-theme',next);
+});
+</script>

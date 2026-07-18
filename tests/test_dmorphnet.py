@@ -99,3 +99,18 @@ class TestEvaluate:
         from sklearn.metrics import roc_auc_score
         lo, hi = evaluate.bootstrap_ci(y, p, roc_auc_score, n=300)
         assert lo <= roc_auc_score(y, p) <= hi
+
+
+class TestFreqFeat:
+    def test_dim_and_dtype(self):
+        from dmorphnet import freqfeat
+        f = freqfeat.freq_features(_img(5, 128))
+        assert f.shape == (freqfeat.DIM,) and f.dtype == np.float32
+
+    def test_blur_reduces_highpass_energy(self):
+        import cv2
+        from dmorphnet import freqfeat
+        img = _img(6, 256)
+        sharp = freqfeat.freq_features(img)[:64].mean()
+        blurred = freqfeat.freq_features(cv2.GaussianBlur(img, (7, 7), 0))[:64].mean()
+        assert blurred < sharp

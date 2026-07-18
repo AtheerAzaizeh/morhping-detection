@@ -49,8 +49,12 @@ else:  # legacy fallback (pre-Part 3 artifacts)
         "model": joblib.load(APP_DIR / "model" / "svm.joblib"),
         "threshold": joblib.load(APP_DIR / "model" / "config.joblib")["threshold"],
     }
+USE_FREQ = bool(art.get("use_freq", False))
+USE_TTA = bool(art.get("use_tta", False))
+if USE_FREQ:
+    from dmorphnet.freqfeat import freq_features_batch
 print(f"artifact v{art['version']} | backbones: {art['backbones']} "
-      f"| threshold: {art['threshold']:.2f}")
+      f"| freq: {USE_FREQ} | tta: {USE_TTA} | threshold: {art['threshold']:.2f}")
 
 detector = mp_vision.FaceDetector.create_from_options(mp_vision.FaceDetectorOptions(
     base_options=mp_python.BaseOptions(
@@ -87,16 +91,26 @@ def crop_face(img):
     return cv2.resize(crop, (512, 512), interpolation=cv2.INTER_CUBIC)
 
 
+def _features(x):
+    """Stacked scaled feature row(s) for a uint8 image batch, artifact-driven."""
+    Z = np.hstack([art["scalers"][b].transform(
+                       extract_features(b, x, model=backbones[b]))
+                   for b in art["backbones"]])
+    if USE_FREQ:
+        Z = np.hstack([Z, art["scalers"]["freq"].transform(freq_features_batch(x))])
+    return Z
+
+
 def predict(img):
     t0 = time.time()
     face = crop_face(img)
     if face is None:
         return {"error": "No face detected in the image. Upload a clear frontal face photo."}
     x = standardize(face)[None]
-    Z = np.hstack([art["scalers"][b].transform(
-                       extract_features(b, x, model=backbones[b]))
-                   for b in art["backbones"]])
-    p_morph = float(art["model"].predict_proba(Z)[0, 1])
+    p_morph = float(art["model"].predict_proba(_features(x))[0, 1])
+    if USE_TTA:
+        p_flip = float(art["model"].predict_proba(_features(x[:, :, ::-1, :].copy()))[0, 1])
+        p_morph = (p_morph + p_flip) / 2
     verdict = "MORPH" if p_morph >= art["threshold"] else "REAL"
     ok, buf = cv2.imencode(".jpg", face, [cv2.IMWRITE_JPEG_QUALITY, 88])
     return {

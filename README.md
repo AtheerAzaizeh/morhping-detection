@@ -17,6 +17,24 @@ Two-part course project:
    ROC-AUC, threshold optimization, EfficientNet B0/B5/B6 comparison, network-internals
    visualizations (filters, activation maps, PCA/t-SNE) and a real-time prediction demo.
 
+## Improvement rounds (professional engineering passes)
+
+- `notebooks/Part3_Professional_Improvements.ipynb` — code review of Part 2 + one measured
+  fix per step: leakage-free `GroupKFold` selection, expanded balanced data, fusion trial,
+  calibration, out-of-fold thresholds, MAD metrics (DET/EER/APCER/BPCER, bootstrap CIs) and
+  the cross-generator probe. Report: `reports/Part3_Improvements_Report.md`.
+- `notebooks/Part2_Improved_DMorphNet.ipynb` — **the article-faithful refinement**: stays
+  strictly inside the paper's EfficientNet-B6 + SVM-RBF recipe and adds what Part 2 skipped —
+  a true §3.4 fine-tune of B6's top layers (block7, via model surgery on CPU), the full data
+  recipe, and §4.4 threshold optimization done on out-of-fold predictions. Step-by-step
+  results in the notebook; exports the deployed `app/model/pipeline.joblib`.
+- `notebooks/Part4_Advanced_Improvements.ipynb` — exploratory round beyond the paper:
+  classifier zoo, frequency features, TTA, multi-generator training (closes the spliced-morph
+  hole: APCER 0.97 → 0.50), fine-tuned B0 comparison. Report:
+  `reports/Part4_Advanced_Improvements_Report.md`.
+
+The pipeline itself lives in **`src/dmorphnet/`** (unit-tested: `pytest tests/`).
+
 ## Try the model — web demo
 
 A small Flask app lets you upload any photo and get a live **real / morph** verdict
